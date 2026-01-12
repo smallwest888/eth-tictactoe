@@ -1,0 +1,343 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Tic Tac Toe Probability Demo</title>
+  <style>
+    :root {
+      color-scheme: light dark;
+      --bg: #0f172a;
+      --panel: #1e293b;
+      --line: #334155;
+      --accent: #38bdf8;
+      --text: #e2e8f0;
+    }
+    body {
+      margin: 0;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      display: flex;
+      justify-content: center;
+      padding: 24px;
+    }
+    .app {
+      width: min(960px, 100%);
+    }
+    h1 { margin: 0 0 12px 0; font-weight: 700; letter-spacing: 0.5px; }
+    .panel {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      padding: 16px;
+      margin-bottom: 14px;
+      box-shadow: 0 10px 40px rgba(0,0,0,0.35);
+    }
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 8px;
+      width: 300px;
+      margin: 0 auto 12px;
+    }
+    .cell {
+      aspect-ratio: 1 / 1;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 42px;
+      cursor: pointer;
+      background: rgba(255,255,255,0.03);
+      transition: background 120ms ease, transform 80ms ease;
+    }
+    .cell:hover { background: rgba(56, 189, 248, 0.08); }
+    .cell:active { transform: scale(0.98); }
+    .board-wrap { text-align: center; }
+    .stats { display: flex; flex-wrap: wrap; gap: 12px; margin-top: 8px; }
+    .tag {
+      padding: 6px 10px;
+      border-radius: 8px;
+      background: rgba(56, 189, 248, 0.08);
+      border: 1px solid rgba(56,189,248,0.3);
+      font-size: 13px;
+    }
+    .controls { display: flex; gap: 10px; flex-wrap: wrap; justify-content: center; }
+    button {
+      background: var(--accent);
+      color: #0b1727;
+      border: none;
+      border-radius: 8px;
+      padding: 10px 14px;
+      font-size: 14px;
+      cursor: pointer;
+      font-weight: 600;
+      box-shadow: 0 6px 18px rgba(56,189,248,0.35);
+      transition: transform 100ms ease, box-shadow 120ms ease;
+    }
+    button:active { transform: translateY(1px); box-shadow: 0 4px 10px rgba(56,189,248,0.25); }
+    .label { font-size: 14px; opacity: 0.9; }
+    .prob { font-size: 26px; font-weight: 700; color: #7dd3fc; }
+    .legend { display: flex; gap: 10px; justify-content: center; margin-top: 6px; font-size: 13px; opacity: 0.85; }
+    .legend span { display: inline-flex; align-items: center; gap: 4px; }
+  </style>
+</head>
+<body>
+  <div class="app">
+    <h1>Tic Tac Toe (Player Black ●, Computer White ○)</h1>
+    <div class="panel board-wrap">
+      <div class="grid" id="board"></div>
+      <div class="legend">
+        <span>Player: ● (first)</span>
+        <span>Computer: ○ (random block)</span>
+      </div>
+      <div class="controls" style="margin-top: 12px;">
+        <button id="reset">Reset game</button>
+      </div>
+      <div style="margin-top: 10px;">
+        <div class="label">Turn: <span id="turn-label"></span></div>
+        <div class="label">Result: <span id="state-label">Playing</span></div>
+        <div class="label">Player eventual win rate (policies continue):</div>
+        <div class="prob" id="prob-label">--%</div>
+      </div>
+    </div>
+
+    <div class="panel">
+      <div class="label" style="margin-bottom: 8px;">Precomputed (symmetry de-duplicated):</div>
+      <div class="stats">
+        <div class="tag">Unique states: <span id="unique-states">-</span></div>
+        <div class="tag">Terminal states: <span id="terminal-states">-</span></div>
+      </div>
+      <p style="margin-top: 12px; line-height: 1.6;">
+        On load, the page traverses the full tic tac toe game space, normalizes by the eight rotations/flips, and records the set of unique states.
+        For probability: from the current board, recursively enumerate future plays. Player picks uniformly among legal moves; the computer first takes a winning move if available, else randomly blocks the player's immediate win squares, else picks randomly.
+        Probability is the uniform average over legal continuations; draws count as 0, making the result deterministic and reproducible.
+      </p>
+    </div>
+  </div>
+
+  <script>
+    const PLAYER = "X"; // player black (●)
+    const AI = "O";     // computer white (○)
+    const EMPTY = " ";
+    const winningLines = [
+      [0,1,2],[3,4,5],[6,7,8], // rows
+      [0,3,6],[1,4,7],[2,5,8], // cols
+      [0,4,8],[2,4,6]          // diagonals
+    ];
+
+    const transforms = [
+      [0,1,2,3,4,5,6,7,8],                // identity
+      [6,3,0,7,4,1,8,5,2],                // rotate 90
+      [8,7,6,5,4,3,2,1,0],                // rotate 180
+      [2,5,8,1,4,7,0,3,6],                // rotate 270
+      [2,1,0,5,4,3,8,7,6],                // vertical flip
+      [6,7,8,3,4,5,0,1,2],                // horizontal flip
+      [0,3,6,1,4,7,2,5,8],                // main diagonal flip
+      [8,5,2,7,4,1,6,3,0]                 // anti-diagonal flip
+    ];
+
+    const boardEl = document.getElementById("board");
+    const turnLabel = document.getElementById("turn-label");
+    const stateLabel = document.getElementById("state-label");
+    const probLabel = document.getElementById("prob-label");
+    const uniqueStatesEl = document.getElementById("unique-states");
+    const terminalStatesEl = document.getElementById("terminal-states");
+    const resetBtn = document.getElementById("reset");
+
+    let board = Array(9).fill(EMPTY);
+    let turn = PLAYER; // player moves first
+    let memoProb = new Map();
+    let precomputedStates;
+
+    function applyTransform(boardStr, map) {
+      return map.map(i => boardStr[i]).join("");
+    }
+
+    function canonicalBoard(boardStr) {
+      let best = boardStr;
+      for (const t of transforms) {
+        const candidate = applyTransform(boardStr, t);
+        if (candidate < best) best = candidate;
+      }
+      return best;
+    }
+
+    function checkWinner(boardStr) {
+      for (const line of winningLines) {
+        const [a,b,c] = line;
+        if (boardStr[a] !== EMPTY && boardStr[a] === boardStr[b] && boardStr[a] === boardStr[c]) {
+          return boardStr[a];
+        }
+      }
+      if (!boardStr.includes(EMPTY)) return "Draw";
+      return null;
+    }
+
+    function nextTurn(current) {
+      return current === PLAYER ? AI : PLAYER;
+    }
+
+    function generateStateSpace() {
+      const visited = new Map(); // canonical -> {board, turn, winner}
+      const queue = [{ board: EMPTY.repeat(9), turn: PLAYER }];
+      while (queue.length) {
+        const state = queue.shift();
+        const canon = canonicalBoard(state.board);
+        if (visited.has(canon)) continue;
+        const winner = checkWinner(state.board);
+        visited.set(canon, { board: state.board, turn: state.turn, winner });
+        if (winner) continue;
+        const nt = nextTurn(state.turn);
+        for (let i = 0; i < 9; i++) {
+          if (state.board[i] !== EMPTY) continue;
+          const nb = state.board.substring(0, i) + state.turn + state.board.substring(i + 1);
+          queue.push({ board: nb, turn: nt });
+        }
+      }
+      return visited;
+    }
+
+    function winningMoves(boardStr, symbol) {
+      const spots = [];
+      for (const line of winningLines) {
+        const [a,b,c] = line;
+        const cells = [boardStr[a], boardStr[b], boardStr[c]];
+        const countSelf = cells.filter(v => v === symbol).length;
+        const countEmpty = cells.filter(v => v === EMPTY).length;
+        if (countSelf === 2 && countEmpty === 1) {
+          const idx = line[cells.indexOf(EMPTY)];
+          spots.push(idx);
+        }
+      }
+      return spots;
+    }
+
+    function availableMoves(boardStr) {
+      const moves = [];
+      for (let i = 0; i < 9; i++) if (boardStr[i] === EMPTY) moves.push(i);
+      return moves;
+    }
+
+    function blockPolicyMoves(boardStr) {
+      const win = winningMoves(boardStr, AI);
+      if (win.length) return win;
+      const block = winningMoves(boardStr, PLAYER);
+      if (block.length) return block;
+      return availableMoves(boardStr);
+    }
+
+    function randomPolicyMoves(boardStr) {
+      return availableMoves(boardStr);
+    }
+
+    function probPlayerWin(boardStr, currentTurn) {
+      const key = canonicalBoard(boardStr) + "|" + currentTurn;
+      if (memoProb.has(key)) return memoProb.get(key);
+
+      const status = checkWinner(boardStr);
+      if (status === PLAYER) return 1;
+      if (status === AI || status === "Draw") return 0;
+
+      let prob = 0;
+      const nt = nextTurn(currentTurn);
+
+      if (currentTurn === PLAYER) {
+        const moves = availableMoves(boardStr);
+        let sum = 0;
+        for (const idx of moves) {
+          const nb = boardStr.substring(0, idx) + currentTurn + boardStr.substring(idx + 1);
+          sum += probPlayerWin(nb, nt);
+        }
+        prob = moves.length ? sum / moves.length : 0;
+      } else {
+        // Computer mixes between random play and block-first policy (50/50).
+        const policies = [
+          blockPolicyMoves(boardStr),
+          randomPolicyMoves(boardStr)
+        ];
+        let sumPolicy = 0;
+        for (const moves of policies) {
+          let sum = 0;
+          for (const idx of moves) {
+            const nb = boardStr.substring(0, idx) + currentTurn + boardStr.substring(idx + 1);
+            sum += probPlayerWin(nb, nt);
+          }
+          const avg = moves.length ? sum / moves.length : 0;
+          sumPolicy += avg;
+        }
+        prob = sumPolicy / policies.length;
+      }
+
+      memoProb.set(key, prob);
+      return prob;
+    }
+
+    function render() {
+      boardEl.innerHTML = "";
+      board.forEach((cell, idx) => {
+        const div = document.createElement("div");
+        div.className = "cell";
+        div.textContent = cell === PLAYER ? "●" : cell === AI ? "○" : "";
+        div.onclick = () => handlePlayerMove(idx);
+        boardEl.appendChild(div);
+      });
+      turnLabel.textContent = turn === PLAYER ? "Player (Black ●)" : "Computer (White ○)";
+      const status = checkWinner(board.join(""));
+      if (status === PLAYER) stateLabel.textContent = "Player wins";
+      else if (status === AI) stateLabel.textContent = "Computer wins";
+      else if (status === "Draw") stateLabel.textContent = "Draw";
+      else stateLabel.textContent = "Playing";
+
+      const prob = probPlayerWin(board.join(""), turn);
+      probLabel.textContent = (prob * 100).toFixed(1) + "%";
+    }
+
+    function handlePlayerMove(idx) {
+      if (turn !== PLAYER) return;
+      if (board[idx] !== EMPTY) return;
+      if (checkWinner(board.join(""))) return;
+      board[idx] = PLAYER;
+      turn = nextTurn(turn);
+      render();
+      // Auto trigger computer move if game not finished.
+      if (!checkWinner(board.join("")) && turn === AI) {
+        handleAIMove();
+      }
+    }
+
+    function handleAIMove() {
+      if (turn !== AI) return;
+      if (checkWinner(board.join(""))) return;
+      const strategies = [blockPolicyMoves, randomPolicyMoves];
+      const strat = strategies[Math.floor(Math.random() * strategies.length)];
+      const moves = strat(board.join(""));
+      if (!moves.length) return;
+      const choice = moves[Math.floor(Math.random() * moves.length)];
+      board[choice] = AI;
+      turn = nextTurn(turn);
+      render();
+    }
+
+    function reset() {
+      board = Array(9).fill(EMPTY);
+      turn = PLAYER;
+      memoProb.clear();
+      render();
+    }
+
+    function init() {
+      precomputedStates = generateStateSpace();
+      const terminalCount = Array.from(precomputedStates.values()).filter(v => v.winner).length;
+      uniqueStatesEl.textContent = precomputedStates.size;
+      terminalStatesEl.textContent = terminalCount;
+      render();
+    }
+
+    resetBtn.addEventListener("click", reset);
+    init();
+  </script>
+</body>
+</html>
