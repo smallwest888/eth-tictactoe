@@ -3,6 +3,10 @@
 **/artifacts/**
 /artifacts
 /.deps
+# Hardhat cache
+cache/
+# Dependencies
+node_modules/
 # Remix plugin state folders
 deps/
 states/
@@ -14,3 +18,5 @@ states/
 # Optional
 .env
 .env.local
+/node_modules
+/cache
