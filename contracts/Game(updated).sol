@@ -234,22 +234,9 @@ contract TicTacToe {
 
     // frontend
     function getGame(uint256 gameId) external view returns (
-        address playerX,
-        address playerO,
-        uint256 bet,
-        uint256 prizePool,
-        uint256 depositX,
-        uint256 depositO,
-        address turn,
-        State state,
-        bool raiseActive,
-        address raiser,
-        uint256 targetDeposit,
-        uint256 raiseDeadline,
-        bool paid
+        Game memory
     ) {
-        Game storage g = games[gameId];
-        return (g.playerX, g.playerO, g.bet, g.prizePool, g.depositX, g.depositO, g.turn, g.state,g.raiseActive, g.raiser, g.targetDeposit, g.raiseDeadline, g.paid);
+        return games[gameId];
     }
 
     function getCell(uint256 gameId, uint8 x, uint8 y) external view returns (Cell) {
