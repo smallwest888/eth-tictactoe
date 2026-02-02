@@ -200,9 +200,6 @@
             <span>Player: ● (first)</span>
             <span>Computer: ○ (random block)</span>
           </div>
-          <div class="controls" style="margin-top: 10px;">
-            <button id="reset">Reset game</button>
-          </div>
           <div style="margin-top: 10px;">
             <div class="label">Turn: <span id="turn-label"></span></div>
             <div class="label">Result: <span id="state-label">Playing</span></div>
@@ -360,7 +357,6 @@
     const probLabel = document.getElementById("prob-label");
     const uniqueStatesEl = document.getElementById("unique-states");
     const terminalStatesEl = document.getElementById("terminal-states");
-    const resetBtn = document.getElementById("reset");
     const connectBtn = document.getElementById("connect");
     const setAddrBtn = document.getElementById("set-address");
     const createBtn = document.getElementById("create-game");
@@ -394,8 +390,10 @@
     let lastLoggedBoard = "";
     let timerSeconds = MOVE_TIMEOUT_SEC;
     let timerInterval = null;
+    let balanceInterval = null;
     let onChainState = 1; // 1 = Playing
     let timeoutTriggered = false;
+    let forcedOutcome = null; // "X" or "O" when win prob hits 0
 
     function applyTransform(boardStr, map) {
       return map.map(i => boardStr[i]).join("");
@@ -535,6 +533,13 @@
       else stateLabel.textContent = "Playing";
 
       const prob = probPlayerWin(board.join(""), turn);
+      if (onChainState === 1 && prob === 0) {
+        forcedOutcome = turn === PLAYER ? AI : PLAYER;
+        stateLabel.textContent = forcedOutcome === PLAYER ? "Player wins (forced)" : "Computer wins (forced)";
+        stopTimer();
+      } else {
+        forcedOutcome = null;
+      }
       probLabel.textContent = (prob * 100).toFixed(1) + "%";
 
       const boardStr = board.join("");
@@ -558,6 +563,11 @@
       if (lastGameId == null || isNaN(Number(lastGameId))) {
         return setStatus("Game ID unknown. Create/join first and wait for confirmation.");
       }
+      if (probPlayerWin(board.join(""), turn) === 0) {
+        stopTimer();
+        return setStatus("Win probability is 0. Game already decided.");
+      }
+      stopTimer();
 
       const x = Math.floor(idx / 3), y = idx % 3;
       setStatus("Submitting move on-chain…");
@@ -576,6 +586,11 @@
       if (onChainState !== 1) return;
       if (!provider || !isLocalNode) return;
       if (lastGameId == null || isNaN(Number(lastGameId))) return;
+      if (probPlayerWin(board.join(""), turn) === 0) {
+        stopTimer();
+        return;
+      }
+      stopTimer();
       const strategies = [blockPolicyMoves, randomPolicyMoves];
       const strat = strategies[Math.floor(Math.random() * strategies.length)];
       const moves = strat(board.join(""));
@@ -592,15 +607,6 @@
       } catch (e) {
         setStatus("Computer move failed: " + (e.shortMessage || e.message));
       }
-    }
-
-    function reset() {
-      board = Array(9).fill(EMPTY);
-      turn = PLAYER;
-      memoProb.clear();
-      lastLoggedBoard = "";
-      stopTimer();
-      render();
     }
 
     function stopTimer() {
@@ -654,6 +660,13 @@
 
     function showOnChainDemoPanel() {
       if (onChainDemoPanelEl) onChainDemoPanelEl.classList.remove("panel-hidden");
+    }
+
+    function startBalanceRefresh() {
+      if (balanceInterval) return;
+      balanceInterval = setInterval(() => {
+        refreshBalances();
+      }, 12000);
     }
 
     function syncGameIdToInputs() {
@@ -722,6 +735,7 @@
         setStatus("Wallet connected.");
         updateGameLock();
         refreshBalances();
+        startBalanceRefresh();
         showOnChainDemoPanel();
       } catch (e) {
         setStatus(`Connect failed: ${e.message}`);
@@ -743,6 +757,7 @@
         setStatus("Using local demo account (Hardhat node #0).");
         updateGameLock();
         refreshBalances();
+        startBalanceRefresh();
         showOnChainDemoPanel();
       } catch (e) {
         setStatus(`Set demo address failed: ${e.message}`);
@@ -772,6 +787,7 @@
         contractAddressErrorEl.textContent = "";
         setStatus("Contract address updated.");
         refreshBalances();
+        startBalanceRefresh();
         showOnChainDemoPanel();
       } catch (e) {
         contractAddressErrorEl.textContent = "Invalid address: " + (e.shortMessage || e.message);
@@ -800,6 +816,7 @@
         setStatus("Contract deployed at " + addr + " (TicTacToe: on-chain moves)");
         updateGameLock();
         refreshBalances();
+        startBalanceRefresh();
         showOnChainDemoPanel();
       } catch (e) {
         setStatus("Deploy failed: " + (e.shortMessage || e.message));
@@ -1061,7 +1078,6 @@
     document.getElementById("deploy-contract").addEventListener("click", deployNewContract);
     document.getElementById("use-computer").addEventListener("click", useComputerAccount);
 
-    resetBtn.addEventListener("click", reset);
     connectBtn.addEventListener("click", connectWallet);
     setAddrBtn.addEventListener("click", useDemoAddress);
     createBtn.addEventListener("click", createGameOnChain);
