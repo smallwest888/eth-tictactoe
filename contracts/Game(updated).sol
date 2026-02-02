@@ -3,7 +3,7 @@ pragma solidity ^0.8.27;
 
 contract TicTacToe {
     enum Cell { Empty, X, O }
-    enum State { Waiting, Playing, Draw, WinX, WinO }
+    enum State { Waiting, Playing, Draw, WinX, WinO, Cancelled }
 
     uint256 public constant MOVE_TIMEOUT = 60; // 60s without a move => timeout
     uint256 public constant feeBps = 250; // 2.5%
@@ -49,6 +49,7 @@ contract TicTacToe {
     event Raised(uint256 indexed gameId, address indexed player, uint256 amount, uint256 targetDeposit, uint256 deadline);
     event RaiseMatched(uint256 indexed gameId, address indexed player, uint256 amount, uint256 depositX, uint256 depositO);
     event Loss(uint256 indexed gameId, address indexed loser, address indexed winner);
+    event GameCancelled(uint256 indexed gameId, address indexed playerX, uint256 refund);
 
     /// @param _dev Fee recipient; pass address(0) to use deployer as Dev
     constructor(address _dev) {
@@ -69,6 +70,23 @@ contract TicTacToe {
         g.turn = msg.sender;
         g.state = State.Waiting;
         emit GameCreated(gameId, msg.sender, msg.value);
+    }
+
+    // Cancel game (creator only) when no one joined; refunds full bet
+    function cancelGame(uint256 gameId) external nonReentrant {
+        Game storage g = games[gameId];
+        require(g.state == State.Waiting, "not waiting");
+        require(g.playerO == address(0), "already joined");
+        require(msg.sender == g.playerX, "not creator");
+        require(!g.paid, "already paid");
+        uint256 refund = g.prizePool;
+        require(refund > 0, "nothing to refund");
+        g.prizePool = 0;
+        g.paid = true;
+        g.state = State.Cancelled;
+        emit GameCancelled(gameId, msg.sender, refund);
+        (bool ok, ) = payable(msg.sender).call{value: refund}("");
+        require(ok, "refund failed");
     }
 
     // join Game

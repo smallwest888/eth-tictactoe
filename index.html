@@ -230,9 +230,14 @@
       <p class="label" style="font-size:12px; color:var(--muted); margin-bottom:8px;">
         Moves are recorded on-chain. Winners are paid automatically and Dev gets the fee each game.
       </p>
-      <div class="label" style="margin-bottom:8px;">Current game ID: <strong id="current-game-id">—</strong> <span style="color:var(--muted); font-size:12px;">(set after you create or join a game; used for Give up / Timeout)</span></div>
+      <div class="label" style="margin-bottom:8px;">Current game ID: <strong id="current-game-id">—</strong> <button type="button" id="copy-game-id" style="margin-left:8px; padding:4px 10px; font-size:12px;">Copy Game ID</button> <span style="color:var(--muted); font-size:12px;">(share this so another window can join)</span></div>
       <button id="open-create-join-modal" style="margin-bottom:12px;">Create game / Join game</button>
       <div style="display:flex; flex-wrap:wrap; gap:12px; align-items:flex-end; margin-top:12px;">
+        <div style="margin-left:8px;">
+          <span class="label">Cancel game (creator only, no one joined)</span>
+          <input id="cancel-id" type="number" min="1" placeholder="Game ID" style="width:80px; padding:8px; border-radius:8px; border:1px solid var(--line); margin-left:4px;">
+          <button id="cancel-game-btn" style="margin-left:4px;">Cancel & refund</button>
+        </div>
         <div style="margin-left:8px;">
           <span class="label">Give up (surrender = draw)</span>
           <input id="surrender-id" type="number" min="1" placeholder="Game ID" style="width:80px; padding:8px; border-radius:8px; border:1px solid var(--line); margin-left:4px;">
@@ -282,6 +287,7 @@
       </div>
       <button id="close-create-join-modal" class="modal-close" aria-label="Close">×</button>
       <h3>Create or join a game</h3>
+      <p class="label" style="font-size:12px; color:var(--muted); margin-bottom:12px;">Two local windows: (1) Window A — Create game, then copy Game ID above. (2) Window B — Paste Game ID below, enter stake, click Join game or Join as Computer.</p>
       <div class="section" style="display:flex; flex-wrap:wrap; gap:12px;">
         <div style="flex:1 1 260px; min-width:260px;">
           <div class="label">Create Game (player X) — stake in ETH</div>
@@ -289,15 +295,17 @@
           <button id="create-game" style="margin-top:6px;">createGame</button>
         </div>
         <div style="flex:1 1 260px; min-width:260px;">
-          <div class="label">Join Game (player O) — match stake</div>
-          <input id="join-id" type="number" min="1" step="1" placeholder="Game ID" style="width:100%; padding:8px; border-radius:8px; border:1px solid var(--line); margin-top:6px;">
+          <div class="label">Join Game (player O) — paste Game ID, match stake</div>
+          <input id="join-id" type="number" min="1" step="1" placeholder="Game ID (from other window)" style="width:100%; padding:8px; border-radius:8px; border:1px solid var(--line); margin-top:6px;">
           <input id="join-stake" type="number" min="0" step="0.01" placeholder="0.1" style="width:100%; padding:8px; border-radius:8px; border:1px solid var(--line); margin-top:6px;">
-          <button id="join-game" style="margin-top:6px;">joinGame</button>
+          <button id="join-game" style="margin-top:6px;">Join game (current account)</button>
+          <button id="join-as-computer" style="margin-top:6px; margin-left:6px;">Join as Computer (player O)</button>
+          <div class="label" style="font-size:12px; color:var(--muted); margin-top:6px;">Use current account or computer account to join. Same contract & network in both windows.</div>
         </div>
         <div style="flex:1 1 260px; min-width:260px;">
-          <div class="label">Computer join (demo only)</div>
+          <div class="label">Computer join last game (same window)</div>
           <button id="computer-join" style="margin-top:6px;">Computer join last game</button>
-          <div class="label" style="font-size:12px; color:var(--muted); margin-top:6px;">Uses computer account to match stake.</div>
+          <div class="label" style="font-size:12px; color:var(--muted); margin-top:6px;">In creator window only: computer joins the game you just created.</div>
         </div>
       </div>
     </div>
@@ -404,13 +412,18 @@
     let timerSeconds = MOVE_TIMEOUT_SEC;
     let timerInterval = null;
     let balanceInterval = null;
-    let onChainState = 1; // 1 = Playing
+    let waitingPollInterval = null;
+    let playingPollInterval = null;
+    let submittingMove = false;
+    let onChainState = 1; // 0=Waiting, 1=Playing, 2=Draw, 3=WinX, 4=WinO, 5=Cancelled
     let timeoutTriggered = false;
     let forcedOutcome = null; // "X" or "O" when win prob hits 0
     let raiseActive = false;
     let raiseDeadline = 0;
     let raiseRaiser = null;
     let computerMatchInProgress = false;
+    let opponentIsLocalComputer = false;
+    let mySide = null;
 
     function applyTransform(boardStr, map) {
       return map.map(i => boardStr[i]).join("");
@@ -543,16 +556,27 @@
         div.onclick = () => handlePlayerMove(idx);
         boardEl.appendChild(div);
       });
-      turnLabel.textContent = turn === PLAYER ? "Player (Black ●)" : "Computer (White ○)";
-      if (onChainState === 3) stateLabel.textContent = "Player wins";
-      else if (onChainState === 4) stateLabel.textContent = "Computer wins";
-      else if (onChainState === 2) stateLabel.textContent = "Draw";
-      else stateLabel.textContent = "Playing";
+      if (mySide === "O") {
+        turnLabel.textContent = turn === AI ? "Your turn (White ○)" : "Opponent's turn (Black ●)";
+        if (onChainState === 3) stateLabel.textContent = "Opponent wins";
+        else if (onChainState === 4) stateLabel.textContent = "You win";
+        else if (onChainState === 2) stateLabel.textContent = "Draw";
+        else if (onChainState === 5) stateLabel.textContent = "Cancelled";
+        else stateLabel.textContent = "Playing";
+      } else {
+        turnLabel.textContent = turn === PLAYER ? "Player (Black ●)" : "Computer (White ○)";
+        if (onChainState === 3) stateLabel.textContent = "Player wins";
+        else if (onChainState === 4) stateLabel.textContent = "Computer wins";
+        else if (onChainState === 2) stateLabel.textContent = "Draw";
+        else if (onChainState === 5) stateLabel.textContent = "Cancelled";
+        else stateLabel.textContent = "Playing";
+      }
 
       const prob = probPlayerWin(board.join(""), turn);
       if (onChainState === 1 && prob === 0) {
         forcedOutcome = turn === PLAYER ? AI : PLAYER;
-        stateLabel.textContent = forcedOutcome === PLAYER ? "Player wins (forced)" : "Computer wins (forced)";
+        if (mySide === "O") stateLabel.textContent = forcedOutcome === PLAYER ? "Opponent wins (forced)" : "You win (forced)";
+        else stateLabel.textContent = forcedOutcome === PLAYER ? "Player wins (forced)" : "Computer wins (forced)";
         stopTimer();
       } else {
         forcedOutcome = null;
@@ -574,9 +598,14 @@
 
     async function handlePlayerMove(idx) {
       if (!contract) return;
-      if (turn !== PLAYER) return;
+      if (submittingMove) return;
+      const isMyTurn = (mySide === "O" && turn === AI) || (mySide !== "O" && turn === PLAYER);
+      if (!isMyTurn) return;
       if (board[idx] !== EMPTY) return;
-      if (onChainState !== 1) return;
+      if (onChainState !== 1) {
+        if (onChainState === 0) setStatus("Waiting for player O to join. Copy Game ID and use another window to «Join as Computer».");
+        return;
+      }
       if (lastGameId == null || isNaN(Number(lastGameId))) {
         return setStatus("Game ID unknown. Create/join first and wait for confirmation.");
       }
@@ -587,14 +616,29 @@
       stopTimer();
 
       const x = Math.floor(idx / 3), y = idx % 3;
+      submittingMove = true;
       setStatus("Submitting move on-chain…");
       try {
         const tx = await contract.move(lastGameId, x, y);
-        await tx.wait();
+        const MOVE_WAIT_MS = 45000;
+        const receipt = await Promise.race([
+          tx.wait(),
+          new Promise((_, rej) => setTimeout(() => rej(new Error("tx_timeout")), MOVE_WAIT_MS))
+        ]).catch(e => {
+          if (e && e.message === "tx_timeout") return null;
+          throw e;
+        });
+        if (receipt == null) {
+          setStatus("Move submitted. Waiting for confirmation… (board will update when confirmed)");
+          return;
+        }
         await syncBoardFromChain();
-        if (onChainState === 1 && turn === AI) await handleAIMove();
+        setStatus("Move confirmed.");
+        if (onChainState === 1 && turn === AI && opponentIsLocalComputer) await handleAIMove();
       } catch (e) {
         setStatus("move failed: " + (e.shortMessage || e.message));
+      } finally {
+        submittingMove = false;
       }
     }
 
@@ -651,13 +695,15 @@
             if (raiseActive) {
               contract.lose(lastGameId).then(() => {
                 setStatus("Raise expired. Raiser wins.");
+                refreshBalances();
                 syncBoardFromChain();
-              }).catch(() => {});
+              }).catch(e => setStatus("Claim win failed: " + (e.shortMessage || e.message)));
             } else {
               contract.claimTimeout(lastGameId).then(() => {
-                setStatus("Timeout claimed. Current player loses.");
+                setStatus("Timeout claimed. Current player loses. Winner paid.");
+                refreshBalances();
                 syncBoardFromChain();
-              }).catch(() => {});
+              }).catch(e => setStatus("Timeout claim failed: " + (e.shortMessage || e.message)));
             }
           }
           return;
@@ -672,12 +718,14 @@
     }
 
     function updateGameLock() {
-      const canPlay = !!contract && userHasStaked;
+      const canPlay = !!contract && userHasStaked && onChainState === 1;
       if (gameAreaEl) gameAreaEl.classList.toggle("game-locked", !canPlay);
       if (connectPromptEl) {
         connectPromptEl.style.display = "block";
         if (!contract) connectPromptEl.textContent = "Connect a wallet or use Demo Address, then create or join a game with ETH to unlock the board.";
         else if (!userHasStaked) connectPromptEl.textContent = "Create or join a game with ETH to unlock the board.";
+        else if (onChainState === 0) connectPromptEl.textContent = "Waiting for player O to join. Copy Game ID above and use another window to «Join as Computer» (or paste Game ID there and join).";
+        else if (onChainState !== 1) connectPromptEl.textContent = "Game ended. Create or join a new game to play.";
         else connectPromptEl.style.display = "none";
       }
     }
@@ -700,6 +748,8 @@
       const timeoutId = document.getElementById("timeout-id");
       const raiseId = document.getElementById("raise-id");
       if (surrenderId) surrenderId.value = id;
+      const cancelId = document.getElementById("cancel-id");
+      if (cancelId) cancelId.value = id;
       if (timeoutId) timeoutId.value = id;
       if (raiseId) raiseId.value = id;
     }
@@ -707,23 +757,48 @@
     async function syncBoardFromChain() {
       if (!contract || lastGameId == null) return;
       try {
-        const flat = await contract.getBoard(lastGameId);
-        const g = await contract.getGame(lastGameId);
+        let flat;
+        let g;
+        try {
+          flat = await contract.getBoard(lastGameId);
+          g = await contract.getGame(lastGameId);
+        } catch (decodeErr) {
+          setStatus("syncBoard failed (decode): " + (decodeErr.shortMessage || decodeErr.message));
+          return;
+        }
+        if (!g) return;
         const turnAddr = g[4] ?? g.turn;
-        const state = Number(g[5] ?? g.state ?? 1);
-        const lastMoveTime = Number(g[7] ?? g.lastMoveTime ?? 0);
+        const stateRaw = g[5] ?? g.state;
+        const state = typeof stateRaw === "bigint" ? Number(stateRaw) : Number(stateRaw ?? 1);
+        const lastMoveTimeRaw = g[7] ?? g.lastMoveTime;
+        const lastMoveTime = typeof lastMoveTimeRaw === "bigint" ? Number(lastMoveTimeRaw) : Number(lastMoveTimeRaw ?? 0);
         let raiseInfo = null;
         try { raiseInfo = await contract.getRaiseInfo(lastGameId); } catch (_) {}
         raiseActive = !!(raiseInfo && (raiseInfo[0] ?? raiseInfo.raiseActive));
-        raiseDeadline = Number(raiseInfo && (raiseInfo[3] ?? raiseInfo.raiseDeadline) || 0);
+        const rd = raiseInfo && (raiseInfo[3] ?? raiseInfo.raiseDeadline);
+        raiseDeadline = typeof rd === "bigint" ? Number(rd) : Number(rd || 0);
         raiseRaiser = raiseInfo && (raiseInfo[1] ?? raiseInfo.raiser);
         const playerX = String((g[0] ?? g.playerX) ?? "").toLowerCase();
+        const playerO = String((g[1] ?? g.playerO) ?? "").toLowerCase();
+        if (!playerX || playerX === "0x0000000000000000000000000000000000000000") {
+          setStatus("Game not found or not created yet.");
+          return;
+        }
+        const flatArr = Array.isArray(flat) ? flat : (flat && typeof flat === "object" ? Array.from({ length: 9 }, (_, i) => flat[i] ?? flat[i.toString()]) : []);
         for (let i = 0; i < 9; i++) {
-          const c = Number(Array.isArray(flat) ? flat[i] : flat && flat[i]);
+          const c = Number(typeof flatArr[i] === "bigint" ? flatArr[i] : (flatArr[i] ?? 0));
           board[i] = c === 0 ? EMPTY : c === 1 ? PLAYER : AI;
         }
         turn = (turnAddr && playerX && String(turnAddr).toLowerCase() === playerX) ? PLAYER : AI;
         onChainState = state;
+        mySide = null;
+        if (signer) {
+          try {
+            const cur = String(await signer.getAddress()).toLowerCase();
+            if (cur === playerX) mySide = "X";
+            else if (cur === playerO) mySide = "O";
+          } catch (_) {}
+        }
 
         if (state === 1) {
           const now = Math.floor(Date.now() / 1000);
@@ -736,7 +811,18 @@
         } else {
           stopTimer();
         }
+        updateGameLock();
         render();
+        if (state === 0 && lastGameId != null) {
+          if (!waitingPollInterval) waitingPollInterval = setInterval(() => syncBoardFromChain(), 3000);
+          if (playingPollInterval) { clearInterval(playingPollInterval); playingPollInterval = null; }
+        } else if (state === 1 && lastGameId != null) {
+          if (waitingPollInterval) { clearInterval(waitingPollInterval); waitingPollInterval = null; }
+          if (!playingPollInterval) playingPollInterval = setInterval(() => syncBoardFromChain(), 2000);
+        } else {
+          if (waitingPollInterval) { clearInterval(waitingPollInterval); waitingPollInterval = null; }
+          if (playingPollInterval) { clearInterval(playingPollInterval); playingPollInterval = null; }
+        }
         if (raiseActive && raiseRaiser && String(raiseRaiser).toLowerCase() !== COMPUTER_ACCOUNT_ADDRESS.toLowerCase() && !computerMatchInProgress && provider && lastGameId != null) {
           computerMatchRaiseIfNeeded();
         }
@@ -825,8 +911,8 @@
         contractEl.textContent = CONTRACT_ADDRESS;
         chainEl.textContent = `Chain: ${network.name} (${network.chainId})`;
         accountEl.textContent = `Account: ${await signer.getAddress()}`;
-        autoComputerJoin = true;
-        setStatus("Using local demo account (Hardhat node #0).");
+        autoComputerJoin = false;
+        setStatus("Using local demo account (Hardhat node #0). Create a game, then in another window use «Join as Computer» with the Game ID.");
         updateGameLock();
         refreshBalances();
         startBalanceRefresh();
@@ -949,6 +1035,7 @@
         lastGameId = gameId;
         userHasStaked = true;
         lastStakeWei = stakeWei;
+        opponentIsLocalComputer = false;
         syncGameIdToInputs();
         updateGameLock();
         await refreshBalances();
@@ -975,14 +1062,27 @@
       const gid = document.getElementById("join-id").value;
       const stake = document.getElementById("join-stake").value || "0";
       const stakeWei = ethers.parseEther(stake);
+      if (!gid || gid === "") return setStatus("Enter Game ID to join.");
       if (stakeWei === 0n) return setStatus("Enter stake > 0 ETH to join a game.");
       try {
+        const g = await contract.getGame(gid);
+        const stateRaw = g[5] ?? g.state;
+        const state = typeof stateRaw === "bigint" ? Number(stateRaw) : Number(stateRaw ?? 0);
+        const playerX = g[0] ?? g.playerX;
+        if (!playerX || String(playerX) === "0x0000000000000000000000000000000000000000") return setStatus("No such game. Check Game ID.");
+        if (state !== 0) {
+          const why = state === 1 ? "already started" : state === 2 ? "draw" : state === 3 ? "X won" : state === 4 ? "O won" : state === 5 ? "cancelled" : "ended";
+          return setStatus("Game " + gid + " is not joinable (" + why + "). Use a game that is still waiting for player O.");
+        }
+        const bet = BigInt(g[2] ?? g.bet ?? 0);
+        if (stakeWei !== bet) return setStatus("Stake must match the game bet: " + ethers.formatEther(bet) + " ETH.");
         setStatus("Sending tx joinGame...");
         const tx = await contract.joinGame(gid, { value: stakeWei });
         const receipt = await tx.wait();
         lastGameId = String(gid);
         userHasStaked = true;
         lastStakeWei = stakeWei;
+        opponentIsLocalComputer = false;
         syncGameIdToInputs();
         updateGameLock();
         await refreshBalances();
@@ -990,7 +1090,9 @@
         setStatus(`joinGame done. tx=${receipt.hash}. Board unlocked.`);
         closeCreateJoinModal();
       } catch (e) {
-        setStatus(`joinGame failed: ${e.shortMessage || e.message}`);
+        const msg = e.shortMessage || e.message || String(e);
+        if (msg.includes("not joinable")) setStatus("Game " + gid + " is not joinable (already started, cancelled, or finished). Use the correct Game ID from the other window.");
+        else setStatus("joinGame failed: " + msg);
       }
     }
 
@@ -1003,12 +1105,85 @@
         setStatus("Computer joining game " + lastGameId + " with same stake...");
         const tx = await computerContract.joinGame(lastGameId, { value: lastStakeWei });
         await tx.wait();
+        opponentIsLocalComputer = true;
         setStatus("Computer joined game " + lastGameId + ". Both sides staked same amount.");
         await refreshBalances();
         await syncBoardFromChain();
         closeCreateJoinModal();
       } catch (e) {
         setStatus("Computer join failed: " + (e.shortMessage || e.message));
+      }
+    }
+
+    function copyGameId() {
+      const id = currentGameIdEl ? currentGameIdEl.textContent : (lastGameId != null ? String(lastGameId) : "");
+      if (!id || id === "—") return setStatus("No game ID to copy. Create a game first.");
+      try {
+        navigator.clipboard.writeText(id);
+        setStatus("Game ID copied to clipboard: " + id);
+      } catch (_) {
+        setStatus("Copy failed. Game ID: " + id);
+      }
+    }
+
+    async function joinGameAsComputerOnChain() {
+      if (!provider) return setStatus("Connect wallet or Use Demo Address first.");
+      if (!contract) return setStatus("Connect wallet first.");
+      const gid = document.getElementById("join-id").value;
+      const stake = document.getElementById("join-stake").value || "0";
+      const stakeWei = ethers.parseEther(stake);
+      if (!gid || gid === "") return setStatus("Enter Game ID (paste from the other window).");
+      if (stakeWei === 0n) return setStatus("Enter stake > 0 ETH to match the game.");
+      try {
+        const g = await contract.getGame(gid);
+        const stateRaw = g[5] ?? g.state;
+        const state = typeof stateRaw === "bigint" ? Number(stateRaw) : Number(stateRaw ?? 0);
+        const playerX = g[0] ?? g.playerX;
+        if (!playerX || String(playerX) === "0x0000000000000000000000000000000000000000") return setStatus("No such game. Check Game ID.");
+        if (state !== 0) {
+          const why = state === 1 ? "already started" : state === 2 ? "draw" : state === 3 ? "X won" : state === 4 ? "O won" : state === 5 ? "cancelled" : "ended";
+          return setStatus("Game " + gid + " is not joinable (" + why + "). Use a game that is still waiting for player O.");
+        }
+        const bet = BigInt(g[2] ?? g.bet ?? 0);
+        if (stakeWei !== bet) return setStatus("Stake must match the game bet: " + ethers.formatEther(bet) + " ETH.");
+        setStatus("Joining as Computer (player O)...");
+        const computerSigner = new ethers.Wallet(COMPUTER_ACCOUNT_PK, provider);
+        const computerContract = new ethers.Contract(CONTRACT_ADDRESS, ABI, computerSigner);
+        const tx = await computerContract.joinGame(gid, { value: stakeWei });
+        await tx.wait();
+        lastGameId = String(gid);
+        lastStakeWei = stakeWei;
+        signer = computerSigner;
+        contract = new ethers.Contract(CONTRACT_ADDRESS, ABI, computerSigner);
+        userHasStaked = true;
+        syncGameIdToInputs();
+        updateGameLock();
+        if (accountEl) accountEl.textContent = "Account: " + COMPUTER_ACCOUNT_ADDRESS + " (Computer)";
+        await refreshBalances();
+        await syncBoardFromChain();
+        setStatus("Joined as Computer (player O). You can move when it's your turn.");
+        closeCreateJoinModal();
+      } catch (e) {
+        const msg = e.shortMessage || e.message || String(e);
+        if (msg.includes("not joinable")) setStatus("Game " + gid + " is not joinable (already started, cancelled, or finished). Use the correct Game ID from the other window.");
+        else setStatus("Join as Computer failed: " + msg);
+      }
+    }
+
+    async function cancelGameOnChain() {
+      if (!contract || !signer) return setStatus("Connect wallet first.");
+      const gidRaw = document.getElementById("cancel-id").value;
+      if (gidRaw === "" || gidRaw == null) return setStatus("Enter Game ID to cancel.");
+      const gameId = BigInt(gidRaw);
+      try {
+        setStatus("Cancelling game (creator refund)...");
+        const tx = await contract.cancelGame(gameId);
+        await tx.wait();
+        setStatus("Game cancelled. Refund sent to creator.");
+        await refreshBalances();
+        if (String(lastGameId) === String(gameId)) await syncBoardFromChain();
+      } catch (e) {
+        setStatus("Cancel failed: " + (e.shortMessage || e.message));
       }
     }
 
@@ -1122,6 +1297,7 @@
       "function getGame(uint256 gameId) view returns (address playerX, address playerO, uint256 bet, uint256 prizePool, address turn, uint8 state, bool paid, uint256 lastMoveTime)",
       "function getRaiseInfo(uint256 gameId) view returns (bool raiseActive, address raiser, uint256 targetDeposit, uint256 raiseDeadline, uint256 depositX, uint256 depositO)",
       "function getBoard(uint256 gameId) view returns (uint8[9])",
+      "function cancelGame(uint256 gameId)",
       "function surrender(uint256 gameId)",
       "function claimTimeout(uint256 gameId)",
       "function raise(uint256 gameId) payable",
@@ -1217,7 +1393,11 @@
 
     document.getElementById("open-create-join-modal").addEventListener("click", openCreateJoinModal);
     document.getElementById("close-create-join-modal").addEventListener("click", closeCreateJoinModal);
+    const copyGameIdBtn = document.getElementById("copy-game-id");
+    if (copyGameIdBtn) copyGameIdBtn.addEventListener("click", copyGameId);
     document.getElementById("computer-join").addEventListener("click", computerJoinLastGame);
+    document.getElementById("join-as-computer").addEventListener("click", joinGameAsComputerOnChain);
+    document.getElementById("cancel-game-btn").addEventListener("click", cancelGameOnChain);
     document.getElementById("surrender-btn").addEventListener("click", surrenderOnChain);
     document.getElementById("timeout-btn").addEventListener("click", claimTimeoutOnChain);
     document.getElementById("raise-btn").addEventListener("click", raiseOnChain);
