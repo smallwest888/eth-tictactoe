@@ -5,11 +5,11 @@ contract TicTacToe {
     enum Cell { Empty, X, O }
     enum State { Waiting, Playing, Draw, WinX, WinO }
 
-    uint256 public constant MOVE_TIMEOUT = 60; // 60 秒未操作则超时
+    uint256 public constant MOVE_TIMEOUT = 60; // 60s without a move => timeout
     uint256 public constant feeBps = 250; // 2.5%
     address public immutable dev;
 
-    // 简易可重入保护
+    // easy reentrancy protection
     bool private locked;
     modifier nonReentrant() {
         require(!locked, "reentrancy");
@@ -27,7 +27,14 @@ contract TicTacToe {
         address turn;
         State state;
         bool paid;
-        uint256 lastMoveTime; // 上次落子/加入时间，用于超时判定
+        uint256 lastMoveTime; // last move/join time for timeout
+        // raise state
+        bool raiseActive;
+        address raiser;
+        uint256 targetDeposit;
+        uint256 raiseDeadline;
+        uint256 depositX;
+        uint256 depositO;
     }
 
     uint256 public gameCount;
@@ -39,8 +46,11 @@ contract TicTacToe {
     event GameEnded(uint256 indexed gameId, State result, address winner, uint256 payout, uint256 devFee);
     event Surrendered(uint256 indexed gameId, address indexed player);
     event Timeout(uint256 indexed gameId, address indexed loser);
+    event Raised(uint256 indexed gameId, address indexed player, uint256 amount, uint256 targetDeposit, uint256 deadline);
+    event RaiseMatched(uint256 indexed gameId, address indexed player, uint256 amount, uint256 depositX, uint256 depositO);
+    event Loss(uint256 indexed gameId, address indexed loser, address indexed winner);
 
-    /// @param _dev 手续费接收账户；传 address(0) 则使用部署者作为 Dev
+    /// @param _dev Fee recipient; pass address(0) to use deployer as Dev
     constructor(address _dev) {
         dev = _dev == address(0) ? msg.sender : _dev;
     }
@@ -80,20 +90,17 @@ contract TicTacToe {
         emit GameJoined(gameId, msg.sender, msg.value);
     }
 
-    //Initiate a raise: the opponent must match the total deposit before the deadline, otherwise they lose the game
-    function raise(uint256 gameId) external payable{
+    // Raise bet during your turn
+    function raise(uint256 gameId) external payable nonReentrant {
         Game storage g = games[gameId];
-
         require(g.state == State.Playing, "not playing");
         require(!g.paid, "already paid");
-        require(!g.raiseActive, "raise already active");
+        require(!g.raiseActive, "raise active");
         require(msg.value > 0, "amount > 0");
-        require(msg.sender == g.playerX || msg.sender == g.playerO, "not a player");
+        require(msg.sender == g.playerX || msg.sender == g.playerO, "not player");
         require(msg.sender == g.turn, "not your turn");
 
-        // Add funds to the prize pool and update deposit accounting 
         g.prizePool += msg.value;
-
         if (msg.sender == g.playerX) {
             g.depositX += msg.value;
             g.targetDeposit = g.depositX;
@@ -101,85 +108,74 @@ contract TicTacToe {
             g.depositO += msg.value;
             g.targetDeposit = g.depositO;
         }
-
         g.raiseActive = true;
         g.raiser = msg.sender;
         g.raiseDeadline = block.timestamp + 60;
-
+        g.lastMoveTime = block.timestamp;
         emit Raised(gameId, msg.sender, msg.value, g.targetDeposit, g.raiseDeadline);
     }
-    
-    // match a raise: the opponent must exactly match the targetDeposit
-    function matchRaise(uint256 gameId) external payable{
-        Game storage g = games[gameId];
 
+    // Match raise: opponent must match target deposit within 60s
+    function matchRaise(uint256 gameId) external payable nonReentrant {
+        Game storage g = games[gameId];
         require(g.state == State.Playing, "not playing");
         require(!g.paid, "already paid");
         require(g.raiseActive, "no active raise");
         require(block.timestamp <= g.raiseDeadline, "too late");
-        require(msg.sender == g.playerX || msg.sender == g.playerO, "not a player");
+        require(msg.sender == g.playerX || msg.sender == g.playerO, "not player");
         require(msg.sender != g.raiser, "raiser cannot match");
 
-        // Compute the exact amount required to match the raiser's total deposit
         uint256 need;
-        if(msg.sender == g.playerX){
-            require(g.targetDeposit >= g.depositX, "internal error");
+        if (msg.sender == g.playerX) {
+            require(g.targetDeposit >= g.depositX, "internal");
             need = g.targetDeposit - g.depositX;
             require(msg.value == need, "must match exactly");
             g.depositX += msg.value;
         } else {
-            require(g.targetDeposit >= g.depositO, "internal error");
+            require(g.targetDeposit >= g.depositO, "internal");
             need = g.targetDeposit - g.depositO;
             require(msg.value == need, "must match exactly");
             g.depositO += msg.value;
         }
 
         g.prizePool += msg.value;
-
-        // clear raise state 
         g.raiseActive = false;
         g.raiser = address(0);
         g.targetDeposit = 0;
         g.raiseDeadline = 0;
-
+        g.lastMoveTime = block.timestamp;
         emit RaiseMatched(gameId, msg.sender, msg.value, g.depositX, g.depositO);
-
     }
 
-    // If the opponent failes to match before the deaedline, they lose and the raiser wins the game
-    function lose(uint256 gameId) external{
+    // If opponent fails to match before deadline, raiser wins
+    function lose(uint256 gameId) external nonReentrant {
         Game storage g = games[gameId];
-
         require(g.state == State.Playing, "not playing");
         require(!g.paid, "already paid");
         require(g.raiseActive, "no active raise");
         require(block.timestamp > g.raiseDeadline, "not expired");
 
         address winner = g.raiser;
-        require(winner != address(0), "no rasier");
+        require(winner != address(0), "no raiser");
         address loser = (winner == g.playerX) ? g.playerO : g.playerX;
 
-        // End the game
         g.state = (winner == g.playerX) ? State.WinX : State.WinO;
-
-        // clear raise state 
         g.raiseActive = false;
         g.raiser = address(0);
         g.targetDeposit = 0;
         g.raiseDeadline = 0;
-
         emit Loss(gameId, loser, winner);
-        payoutWinner(gameId, g, winner);
-
+        _payoutWinner(g, winner, gameId);
     }
 
-    
+    // (raise / match / lose removed)
 
     // Move
     function move(uint256 gameId, uint8 x, uint8 y) external nonReentrant {
         Game storage g = games[gameId];
         require(g.state == State.Playing, "the game is not active");
         require(!g.paid, "already paid");
+        require(!g.raiseActive, "raise active");
         require(msg.sender == g.turn, "it is not your turn");
         require(x < 3 && y < 3, "out of bounds");
         require(g.board[x][y] == Cell.Empty, "taken");
@@ -212,19 +208,25 @@ contract TicTacToe {
             return;
         }
 
-        // 若对手已无获胜可能，直接判当前玩家胜
+        // If opponent cannot win: current player wins only if they can still win; else draw
         Cell opponentCell = (placed == Cell.X) ? Cell.O : Cell.X;
         if (!canPlayerStillWin(g.board, opponentCell)) {
-            g.state = (placed == Cell.X) ? State.WinX : State.WinO;
-            address winner = (placed == Cell.X) ? g.playerX : g.playerO;
-            _payoutWinner(g, winner, gameId);
-            return;
+            if (canPlayerStillWin(g.board, placed)) {
+                g.state = (placed == Cell.X) ? State.WinX : State.WinO;
+                address winner = (placed == Cell.X) ? g.playerX : g.playerO;
+                _payoutWinner(g, winner, gameId);
+                return;
+            } else {
+                g.state = State.Draw;
+                _refundDrawWithFee(g, gameId);
+                return;
+            }
         }
 
         g.turn = (g.turn == g.playerX) ? g.playerO : g.playerX;
     }
 
-    /// 认输：发起方按平局处理，双方退还赌注（不扣手续费）
+    /// Surrender: treated as draw; both get full refund (no fee)
     function surrender(uint256 gameId) external nonReentrant {
         Game storage g = games[gameId];
         require(g.state == State.Playing, "not playing");
@@ -242,10 +244,11 @@ contract TicTacToe {
         _payoutWinner(g, winner, gameId);
     }
 
-    /// 超时：60 秒内未操作，当前回合方判负，对方获胜
+    /// Timeout: no move within 60s; current turn loses, opponent wins
     function claimTimeout(uint256 gameId) external nonReentrant {
         Game storage g = games[gameId];
         require(g.state == State.Playing, "not playing");
+        require(!g.raiseActive, "raise active");
         require(block.timestamp >= g.lastMoveTime + MOVE_TIMEOUT, "not timeout yet");
         address loser = g.turn;
         address winner = (g.turn == g.playerX) ? g.playerO : g.playerX;
@@ -254,7 +257,7 @@ contract TicTacToe {
         _payoutWinner(g, winner, gameId);
     }
 
-    // 兜底：触发 payout/refund（正常对局已自动结算）
+    // Fallback: trigger payout/refund (normal games auto-settle)
     function claim(uint256 gameId) external nonReentrant {
         Game storage g = games[gameId];
         require(!g.paid, "already paid");
@@ -277,6 +280,18 @@ contract TicTacToe {
     ) {
         Game storage g = games[gameId];
         return (g.playerX, g.playerO, g.bet, g.prizePool, g.turn, g.state, g.paid, g.lastMoveTime);
+    }
+
+    function getRaiseInfo(uint256 gameId) external view returns (
+        bool raiseActive,
+        address raiser,
+        uint256 targetDeposit,
+        uint256 raiseDeadline,
+        uint256 depositX,
+        uint256 depositO
+    ) {
+        Game storage g = games[gameId];
+        return (g.raiseActive, g.raiser, g.targetDeposit, g.raiseDeadline, g.depositX, g.depositO);
     }
 
     function getCell(uint256 gameId, uint8 x, uint8 y) external view returns (Cell) {
@@ -302,8 +317,6 @@ contract TicTacToe {
 
         // effects first
         g.prizePool = 0;
-        g.depositX = 0;
-        g.depositO = 0;
 
         uint256 fee = (amount * feeBps) / 10000;
         uint256 remaining = amount - fee;
@@ -344,12 +357,12 @@ contract TicTacToe {
         g.prizePool = 0;
         (bool okX, ) = payable(g.playerX).call{value: b}("");
         require(okX, "refund X failed");
-        (bool okO, ) = payable(g.playerO).call{value: oAmt}("");
+        (bool okO, ) = payable(g.playerO).call{value: b}("");
         require(okO, "refund O failed");
         emit GameEnded(gameId, g.state, address(0), b * 2, 0);
     }
 
-    /// 判断某方是否还有可能连成一线（任意一行/列/对角无对方棋子即有可能）
+    /// Whether a side can still form a line (any row/col/diag with no opponent piece)
     function canPlayerStillWin(Cell[3][3] memory b, Cell c) internal pure returns (bool) {
         Cell opp = (c == Cell.X) ? Cell.O : Cell.X;
         for (uint8 i = 0; i < 3; i++) {

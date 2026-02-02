@@ -1,9 +1,15 @@
 require("@nomicfoundation/hardhat-toolbox");
 
 module.exports = {
-  solidity: "0.8.27",
+  solidity: {
+    version: "0.8.27",
+    settings: {
+      optimizer: { enabled: true, runs: 200 },
+      viaIR: true,
+    },
+  },
   networks: {
-    // 连接本地私链（Geth/Hardhat 节点）
+    // local network
     local: {
       url: "http://127.0.0.1:8545",
     },

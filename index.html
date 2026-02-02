@@ -243,6 +243,14 @@
           <input id="timeout-id" type="number" min="1" placeholder="Game ID" style="width:80px; padding:8px; border-radius:8px; border:1px solid var(--line); margin-left:4px;">
           <button id="timeout-btn" style="margin-left:4px;">claimTimeout</button>
         </div>
+        <div style="margin-left:8px;">
+          <span class="label">Raise bet (your turn)</span>
+          <input id="raise-id" type="number" min="1" placeholder="Game ID" style="width:80px; padding:8px; border-radius:8px; border:1px solid var(--line); margin-left:4px;">
+          <input id="raise-amount" type="number" min="0" step="0.01" placeholder="ETH" style="width:90px; padding:8px; border-radius:8px; border:1px solid var(--line); margin-left:4px;">
+          <button id="raise-btn" style="margin-left:4px;">raise</button>
+          <button id="match-raise-btn" style="margin-left:4px;">match</button>
+          <button id="lose-btn" style="margin-left:4px;">claim win</button>
+        </div>
       </div>
       <div class="label" style="margin-top:10px;">Status:</div>
       <div id="status" style="padding:10px; border:1px solid var(--line); border-radius:8px; min-height:40px; background:rgba(255,255,255,0.03);"></div>
@@ -319,7 +327,11 @@
     const DEMO_ACCOUNT_PK = "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80";
     const COMPUTER_ACCOUNT_PK = "0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d";
     const COMPUTER_ACCOUNT_ADDRESS = "0x70997970C51812dc3A010C7d01b50e0d17dc79C8";
-    const DEV_ACCOUNT_ADDRESS = "0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC";
+    // Dev: dedicated account (not Hardhat #0/#1); starts with 0 balance on local node; fees go here
+    const DEV_ACCOUNT_PK = "0x00000000000000000000000000000000000000000000000000000000000000ff";
+    const DEV_ACCOUNT_ADDRESS = (function () {
+      try { return new ethers.Wallet(DEV_ACCOUNT_PK).address; } catch (_) { return ""; }
+    })();
 
     let provider;
     let signer;
@@ -395,6 +407,10 @@
     let onChainState = 1; // 1 = Playing
     let timeoutTriggered = false;
     let forcedOutcome = null; // "X" or "O" when win prob hits 0
+    let raiseActive = false;
+    let raiseDeadline = 0;
+    let raiseRaiser = null;
+    let computerMatchInProgress = false;
 
     function applyTransform(boardStr, map) {
       return map.map(i => boardStr[i]).join("");
@@ -632,10 +648,17 @@
           timerValueEl.classList.add("danger");
           if (!timeoutTriggered && lastGameId != null && contract) {
             timeoutTriggered = true;
-            contract.claimTimeout(lastGameId).then(() => {
-              setStatus("Timeout claimed. Current player loses.");
-              syncBoardFromChain();
-            }).catch(() => {});
+            if (raiseActive) {
+              contract.lose(lastGameId).then(() => {
+                setStatus("Raise expired. Raiser wins.");
+                syncBoardFromChain();
+              }).catch(() => {});
+            } else {
+              contract.claimTimeout(lastGameId).then(() => {
+                setStatus("Timeout claimed. Current player loses.");
+                syncBoardFromChain();
+              }).catch(() => {});
+            }
           }
           return;
         }
@@ -675,8 +698,10 @@
       if (currentGameIdEl) currentGameIdEl.textContent = id || "—";
       const surrenderId = document.getElementById("surrender-id");
       const timeoutId = document.getElementById("timeout-id");
+      const raiseId = document.getElementById("raise-id");
       if (surrenderId) surrenderId.value = id;
       if (timeoutId) timeoutId.value = id;
+      if (raiseId) raiseId.value = id;
     }
 
     async function syncBoardFromChain() {
@@ -687,6 +712,11 @@
         const turnAddr = g[4] ?? g.turn;
         const state = Number(g[5] ?? g.state ?? 1);
         const lastMoveTime = Number(g[7] ?? g.lastMoveTime ?? 0);
+        let raiseInfo = null;
+        try { raiseInfo = await contract.getRaiseInfo(lastGameId); } catch (_) {}
+        raiseActive = !!(raiseInfo && (raiseInfo[0] ?? raiseInfo.raiseActive));
+        raiseDeadline = Number(raiseInfo && (raiseInfo[3] ?? raiseInfo.raiseDeadline) || 0);
+        raiseRaiser = raiseInfo && (raiseInfo[1] ?? raiseInfo.raiser);
         const playerX = String((g[0] ?? g.playerX) ?? "").toLowerCase();
         for (let i = 0; i < 9; i++) {
           const c = Number(Array.isArray(flat) ? flat[i] : flat && flat[i]);
@@ -695,16 +725,57 @@
         turn = (turnAddr && playerX && String(turnAddr).toLowerCase() === playerX) ? PLAYER : AI;
         onChainState = state;
 
-        if (state === 1 && lastMoveTime > 0) {
+        if (state === 1) {
           const now = Math.floor(Date.now() / 1000);
-          timerSeconds = Math.max(0, MOVE_TIMEOUT_SEC - (now - lastMoveTime));
+          if (raiseActive && raiseDeadline > 0) {
+            timerSeconds = Math.max(0, raiseDeadline - now);
+          } else if (lastMoveTime > 0) {
+            timerSeconds = Math.max(0, MOVE_TIMEOUT_SEC - (now - lastMoveTime));
+          }
           startTimer();
         } else {
           stopTimer();
         }
         render();
+        if (raiseActive && raiseRaiser && String(raiseRaiser).toLowerCase() !== COMPUTER_ACCOUNT_ADDRESS.toLowerCase() && !computerMatchInProgress && provider && lastGameId != null) {
+          computerMatchRaiseIfNeeded();
+        }
       } catch (e) {
         setStatus("syncBoard failed: " + (e.shortMessage || e.message));
+      }
+    }
+
+    async function computerMatchRaiseIfNeeded() {
+      if (!provider || lastGameId == null) return;
+      if (computerMatchInProgress) return;
+      try {
+        const g = await contract.getGame(lastGameId);
+        const r = await contract.getRaiseInfo(lastGameId);
+        const active = !!(r && (r[0] ?? r.raiseActive));
+        if (!active) return;
+        const raiser = r && (r[1] ?? r.raiser);
+        if (!raiser || String(raiser).toLowerCase() === COMPUTER_ACCOUNT_ADDRESS.toLowerCase()) return;
+        const playerX = String((g[0] ?? g.playerX) ?? "").toLowerCase();
+        const playerO = String((g[1] ?? g.playerO) ?? "").toLowerCase();
+        const computerAddr = COMPUTER_ACCOUNT_ADDRESS.toLowerCase();
+        if (playerX !== computerAddr && playerO !== computerAddr) return;
+        const targetDeposit = BigInt(r[2] ?? r.targetDeposit ?? 0);
+        const depositX = BigInt(r[4] ?? r.depositX ?? 0);
+        const depositO = BigInt(r[5] ?? r.depositO ?? 0);
+        const need = playerX === computerAddr ? targetDeposit - depositX : targetDeposit - depositO;
+        if (need <= 0n) return;
+        computerMatchInProgress = true;
+        setStatus("Computer matching raise (must match within 1 min)…");
+        const computerSigner = new ethers.Wallet(COMPUTER_ACCOUNT_PK, provider);
+        const computerContract = new ethers.Contract(CONTRACT_ADDRESS, ABI, computerSigner);
+        const tx = await computerContract.matchRaise(lastGameId, { value: need });
+        await tx.wait();
+        setStatus("Computer matched raise. tx=" + tx.hash);
+        await syncBoardFromChain();
+      } catch (e) {
+        setStatus("Computer match raise failed: " + (e.shortMessage || e.message));
+      } finally {
+        computerMatchInProgress = false;
       }
     }
 
@@ -975,6 +1046,72 @@
       }
     }
 
+    async function raiseOnChain() {
+      if (!contract) return setStatus("Connect wallet first.");
+      const gidRaw = document.getElementById("raise-id").value;
+      const amtRaw = document.getElementById("raise-amount").value || "0";
+      if (gidRaw === "" || gidRaw == null) return setStatus("Enter Game ID for raise.");
+      const amtWei = ethers.parseEther(amtRaw);
+      if (amtWei === 0n) return setStatus("Enter raise amount > 0 ETH.");
+      try {
+        setStatus("Sending tx raise...");
+        const tx = await contract.raise(BigInt(gidRaw), { value: amtWei });
+        const receipt = await tx.wait();
+        setStatus("Raise sent. Other player must match within 1 min. tx=" + receipt.hash);
+        await refreshBalances();
+        await syncBoardFromChain();
+      } catch (e) {
+        setStatus("raise failed: " + (e.shortMessage || e.message));
+      }
+    }
+
+    async function matchRaiseOnChain() {
+      if (!contract || !signer) return setStatus("Connect wallet first.");
+      const gidRaw = document.getElementById("raise-id").value;
+      if (gidRaw === "" || gidRaw == null) return setStatus("Enter Game ID for match.");
+      const gameId = BigInt(gidRaw);
+      try {
+        const g = await contract.getGame(gameId);
+        const r = await contract.getRaiseInfo(gameId);
+        const playerX = String((g[0] ?? g.playerX) ?? "").toLowerCase();
+        const playerO = String((g[1] ?? g.playerO) ?? "").toLowerCase();
+        const targetDeposit = BigInt(r[2] ?? r.targetDeposit ?? 0);
+        const depositX = BigInt(r[4] ?? r.depositX ?? 0);
+        const depositO = BigInt(r[5] ?? r.depositO ?? 0);
+        const myAddr = (await signer.getAddress()).toLowerCase();
+        let need = 0n;
+        if (myAddr === playerX) need = targetDeposit - depositX;
+        else if (myAddr === playerO) need = targetDeposit - depositO;
+        else return setStatus("Only a player can match.");
+        if (need <= 0n) return setStatus("Nothing to match.");
+        setStatus("Sending tx matchRaise...");
+        const tx = await contract.matchRaise(gameId, { value: need });
+        const receipt = await tx.wait();
+        setStatus("Match sent. tx=" + receipt.hash);
+        await refreshBalances();
+        await syncBoardFromChain();
+      } catch (e) {
+        setStatus("match failed: " + (e.shortMessage || e.message));
+      }
+    }
+
+    async function loseOnChain() {
+      if (!contract) return setStatus("Connect wallet first.");
+      const gidRaw = document.getElementById("raise-id").value;
+      if (gidRaw === "" || gidRaw == null) return setStatus("Enter Game ID for claim win.");
+      const gameId = BigInt(gidRaw);
+      try {
+        setStatus("Sending tx lose...");
+        const tx = await contract.lose(gameId);
+        const receipt = await tx.wait();
+        setStatus("Raise expired. Winner paid. tx=" + receipt.hash);
+        await refreshBalances();
+        await syncBoardFromChain();
+      } catch (e) {
+        setStatus("claim win failed: " + (e.shortMessage || e.message));
+      }
+    }
+
     const ABI = [
       "function dev() view returns (address)",
       "function feeBps() view returns (uint256)",
@@ -983,9 +1120,13 @@
       "function joinGame(uint256 gameId) payable",
       "function move(uint256 gameId, uint8 x, uint8 y)",
       "function getGame(uint256 gameId) view returns (address playerX, address playerO, uint256 bet, uint256 prizePool, address turn, uint8 state, bool paid, uint256 lastMoveTime)",
+      "function getRaiseInfo(uint256 gameId) view returns (bool raiseActive, address raiser, uint256 targetDeposit, uint256 raiseDeadline, uint256 depositX, uint256 depositO)",
       "function getBoard(uint256 gameId) view returns (uint8[9])",
       "function surrender(uint256 gameId)",
       "function claimTimeout(uint256 gameId)",
+      "function raise(uint256 gameId) payable",
+      "function matchRaise(uint256 gameId) payable",
+      "function lose(uint256 gameId)",
       "function claim(uint256 gameId)",
       "event GameCreated(uint256 indexed gameId, address indexed playerX, uint256 bet)",
       "event GameJoined(uint256 indexed gameId, address indexed playerO, uint256 bet)",
@@ -1001,10 +1142,15 @@
         return;
       }
       try {
-        const addrs = [CONTRACT_ADDRESS, DEV_ACCOUNT_ADDRESS];
+        let devAddr = null;
+        if (contract) {
+          try { devAddr = await contract.dev(); } catch (_) {}
+        }
+        const addrs = [CONTRACT_ADDRESS];
+        if (devAddr) addrs.push(devAddr);
         const bals = await Promise.all(addrs.map(a => provider.getBalance(a)));
         if (contractBalEl) contractBalEl.textContent = Number(ethers.formatEther(bals[0])).toFixed(4);
-        if (devBalEl) devBalEl.textContent = Number(ethers.formatEther(bals[1])).toFixed(4);
+        if (devBalEl) devBalEl.textContent = devAddr ? Number(ethers.formatEther(bals[1])).toFixed(4) : "—";
         const sBal = await provider.getBalance(await signer.getAddress());
         if (signerBalEl) signerBalEl.textContent = Number(ethers.formatEther(sBal)).toFixed(4);
       } catch (e) {
@@ -1039,11 +1185,13 @@
       }
       let currentAddr = null;
       if (signer) try { currentAddr = await signer.getAddress(); } catch (_) {}
+      let devAddr = null;
+      if (contract) try { devAddr = await contract.dev(); } catch (_) {}
       const rows = [
         { label: "Current signer", addr: currentAddr },
         { label: "Computer (AI wins)", addr: COMPUTER_ACCOUNT_ADDRESS },
         { label: "Contract", addr: CONTRACT_ADDRESS },
-        { label: "Dev (fees)", addr: DEV_ACCOUNT_ADDRESS },
+        { label: "Dev (fees)", addr: devAddr },
       ];
       for (const r of rows) {
         const tr = document.createElement("tr");
@@ -1072,6 +1220,9 @@
     document.getElementById("computer-join").addEventListener("click", computerJoinLastGame);
     document.getElementById("surrender-btn").addEventListener("click", surrenderOnChain);
     document.getElementById("timeout-btn").addEventListener("click", claimTimeoutOnChain);
+    document.getElementById("raise-btn").addEventListener("click", raiseOnChain);
+    document.getElementById("match-raise-btn").addEventListener("click", matchRaiseOnChain);
+    document.getElementById("lose-btn").addEventListener("click", loseOnChain);
     document.getElementById("view-balances").addEventListener("click", openBalancesModal);
     document.getElementById("close-balances-modal").addEventListener("click", closeBalancesModal);
     document.getElementById("refresh-balances-modal").addEventListener("click", refreshBalancesModal);
