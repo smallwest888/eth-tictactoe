@@ -5,50 +5,51 @@ contract TicTacToe {
     enum Cell { Empty, X, O }
     enum State { Waiting, Playing, Draw, WinX, WinO }
 
+    uint256 public constant MOVE_TIMEOUT = 60; // 60 秒未操作则超时
+    uint256 public constant feeBps = 250; // 2.5%
+    address public immutable dev;
+
+    // 简易可重入保护
+    bool private locked;
+    modifier nonReentrant() {
+        require(!locked, "reentrancy");
+        locked = true;
+        _;
+        locked = false;
+    }
+
     struct Game {
         address playerX;
         address playerO;
-
-        uint256 bet;        // base bet required to join
-        uint256 prizePool;  // current total payout
-
-        // track how much each player actually contributed
-        uint256 depositX;
-        uint256 depositO;
-
+        uint256 bet;
+        uint256 prizePool;
         Cell[3][3] board;
         address turn;
         State state;
-
-        // Raise/ challenge state
-        bool raiseActive;      // is there an active raise to match?
-        address raiser;        // who raised last
-        uint256 targetDeposit; // raiser's total deposit after raising 
-        uint256 raiseDeadline; // timestamp until opponent must match
-
         bool paid;
+        uint256 lastMoveTime; // 上次落子/加入时间，用于超时判定
     }
 
     uint256 public gameCount;
     mapping(uint256 => Game) private games;
 
-    // Events for frontend
     event GameCreated(uint256 indexed gameId, address indexed playerX, uint256 bet);
     event GameJoined(uint256 indexed gameId, address indexed playerO, uint256 bet);
     event MoveMade(uint256 indexed gameId, address indexed player, uint8 x, uint8 y, Cell cell);
-    event GameEnded(uint256 indexed gameId, State result, address winner, uint256 payout);
-    event Raised(uint256 indexed gameId, address indexed raiser, uint256 addedAmount, uint256 targetDeposit, uint256 deadline);
-    event RaiseMatched(uint256 indexed gameId, address indexed matcher, uint256 paidAmount, uint256 newDepositX, uint256 newDepositO);
-    event Loss(uint256 indexed gameId, address indexed loser, address indexed winner);
+    event GameEnded(uint256 indexed gameId, State result, address winner, uint256 payout, uint256 devFee);
+    event Surrendered(uint256 indexed gameId, address indexed player);
+    event Timeout(uint256 indexed gameId, address indexed loser);
 
+    /// @param _dev 手续费接收账户；传 address(0) 则使用部署者作为 Dev
+    constructor(address _dev) {
+        dev = _dev == address(0) ? msg.sender : _dev;
+    }
 
     // Create Game
     function createGame() external payable returns (uint256 gameId) {
         require(msg.value > 0, "bet=0");
-
         gameId = ++gameCount;
         Game storage g = games[gameId];
-
         g.playerX = msg.sender;
         g.bet = msg.value;
 
@@ -57,7 +58,6 @@ contract TicTacToe {
 
         g.turn = msg.sender;
         g.state = State.Waiting;
-
         emit GameCreated(gameId, msg.sender, msg.value);
     }
 
@@ -75,6 +75,7 @@ contract TicTacToe {
         g.depositO += msg.value;
 
         g.state = State.Playing;
+        g.lastMoveTime = block.timestamp;
 
         emit GameJoined(gameId, msg.sender, msg.value);
     }
@@ -175,68 +176,99 @@ contract TicTacToe {
     
 
     // Move
-    function move(uint256 gameId, uint8 x, uint8 y) external {
+    function move(uint256 gameId, uint8 x, uint8 y) external nonReentrant {
         Game storage g = games[gameId];
-
         require(g.state == State.Playing, "the game is not active");
         require(!g.paid, "already paid");
         require(msg.sender == g.turn, "it is not your turn");
         require(x < 3 && y < 3, "out of bounds");
         require(g.board[x][y] == Cell.Empty, "taken");
-        require(!g.raiseActive, "raise pending; must wait for match or lose");
 
         Cell placed;
-
         if (msg.sender == g.playerX) {
             placed = Cell.X;
         } else {
-            require(msg.sender == g.playerO, "you are not the player");
+            require(msg.sender == g.playerO, "not player");
             placed = Cell.O;
         }
 
         g.board[x][y] = placed;
+        g.lastMoveTime = block.timestamp;
         emit MoveMade(gameId, msg.sender, x, y, placed);
 
         if (isWin(g.board, Cell.X)) {
             g.state = State.WinX;
-            payoutWinner(gameId, g, g.playerX);
+            _payoutWinner(g, g.playerX, gameId);
             return;
         }
         if (isWin(g.board, Cell.O)) {
             g.state = State.WinO;
-            payoutWinner(gameId, g, g.playerO);
+            _payoutWinner(g, g.playerO, gameId);
             return;
         }
         if (isDraw(g.board)) {
             g.state = State.Draw;
-            refundDraw(gameId, g);
+            _refundDrawWithFee(g, gameId);
+            return;
+        }
+
+        // 若对手已无获胜可能，直接判当前玩家胜
+        Cell opponentCell = (placed == Cell.X) ? Cell.O : Cell.X;
+        if (!canPlayerStillWin(g.board, opponentCell)) {
+            g.state = (placed == Cell.X) ? State.WinX : State.WinO;
+            address winner = (placed == Cell.X) ? g.playerX : g.playerO;
+            _payoutWinner(g, winner, gameId);
             return;
         }
 
         g.turn = (g.turn == g.playerX) ? g.playerO : g.playerX;
     }
 
-    // trigger payout or refund manually
-    function claim(uint256 gameId) external {
+    /// 认输：发起方按平局处理，双方退还赌注（不扣手续费）
+    function surrender(uint256 gameId) external nonReentrant {
         Game storage g = games[gameId];
+        require(g.state == State.Playing, "not playing");
+        require(msg.sender == g.playerX || msg.sender == g.playerO, "not player");
+        g.state = State.Draw;
+        emit Surrendered(gameId, msg.sender);
+        _refundDrawNoFee(g, gameId);
+    }
 
+    /// 超时：60 秒内未操作，当前回合方判负，对方获胜
+    function claimTimeout(uint256 gameId) external nonReentrant {
+        Game storage g = games[gameId];
+        require(g.state == State.Playing, "not playing");
+        require(block.timestamp >= g.lastMoveTime + MOVE_TIMEOUT, "not timeout yet");
+        address loser = g.turn;
+        address winner = (g.turn == g.playerX) ? g.playerO : g.playerX;
+        g.state = (g.turn == g.playerX) ? State.WinO : State.WinX;
+        emit Timeout(gameId, loser);
+        _payoutWinner(g, winner, gameId);
+    }
+
+    // 兜底：触发 payout/refund（正常对局已自动结算）
+    function claim(uint256 gameId) external nonReentrant {
+        Game storage g = games[gameId];
         require(!g.paid, "already paid");
-        require(
-            g.state == State.Draw || g.state == State.WinX || g.state == State.WinO,
-            "not finished"
-        );
-        require(!g.raiseActive, "raise pending");
-
-        if (g.state == State.WinX) payoutWinner(gameId, g, g.playerX);
-        else if (g.state == State.WinO) payoutWinner(gameId, g, g.playerO);
-        else refundDraw(gameId, g);
+        require(g.state == State.Draw || g.state == State.WinX || g.state == State.WinO, "not finished");
+        if (g.state == State.WinX) _payoutWinner(g, g.playerX, gameId);
+        else if (g.state == State.WinO) _payoutWinner(g, g.playerO, gameId);
+        else _refundDrawWithFee(g, gameId);
     }
 
     // frontend
     function getGame(uint256 gameId) external view returns (
-        Game memory
+        address playerX,
+        address playerO,
+        uint256 bet,
+        uint256 prizePool,
+        address turn,
+        State state,
+        bool paid,
+        uint256 lastMoveTime
     ) {
-        return games[gameId];
+        Game storage g = games[gameId];
+        return (g.playerX, g.playerO, g.bet, g.prizePool, g.turn, g.state, g.paid, g.lastMoveTime);
     }
 
     function getCell(uint256 gameId, uint8 x, uint8 y) external view returns (Cell) {
@@ -255,10 +287,9 @@ contract TicTacToe {
     }
 
     // payout
-    function payoutWinner(uint256 gameId, Game storage g, address winner) internal {
+    function _payoutWinner(Game storage g, address winner, uint256 gameId) internal {
         if (g.paid) return;
         g.paid = true;
-
         uint256 amount = g.prizePool;
 
         // effects first
@@ -266,30 +297,60 @@ contract TicTacToe {
         g.depositX = 0;
         g.depositO = 0;
 
-        (bool ok, ) = payable(winner).call{value: amount}("");
-        require(ok, "payout failed");
+        uint256 fee = (amount * feeBps) / 10000;
+        uint256 remaining = amount - fee;
 
-        emit GameEnded(gameId, g.state, winner, amount);
+        if (fee > 0) {
+            (bool fm, ) = dev.call{value: fee}("");
+            require(fm, "fee transfer failed");
+        }
+        (bool ok, ) = payable(winner).call{value: remaining}("");
+        require(ok, "payout failed");
+        emit GameEnded(gameId, g.state, winner, remaining, fee);
     }
 
-    function refundDraw(uint256 gameId, Game storage g) internal {
+    function _refundDrawWithFee(Game storage g, uint256 gameId) internal {
         if (g.paid) return;
         g.paid = true;
-
-        uint256 xAmt = g.depositX;
-        uint256 oAmt = g.depositO;
-
-        // effects first
+        uint256 amount = g.prizePool;
         g.prizePool = 0;
-        g.depositX = 0;
-        g.depositO = 0;
 
-        (bool okX, ) = payable(g.playerX).call{value: xAmt}("");
+        uint256 fee = (amount * feeBps) / 10000;
+        uint256 remaining = amount - fee;
+        if (fee > 0) {
+            (bool fm, ) = dev.call{value: fee}("");
+            require(fm, "fee transfer failed");
+        }
+        uint256 half = remaining / 2;
+        (bool okX, ) = payable(g.playerX).call{value: half}("");
+        require(okX, "refund X failed");
+        (bool okO, ) = payable(g.playerO).call{value: remaining - half}("");
+        require(okO, "refund O failed");
+        emit GameEnded(gameId, g.state, address(0), remaining, fee);
+    }
+
+    function _refundDrawNoFee(Game storage g, uint256 gameId) internal {
+        if (g.paid) return;
+        g.paid = true;
+        uint256 b = g.bet;
+        g.prizePool = 0;
+        (bool okX, ) = payable(g.playerX).call{value: b}("");
         require(okX, "refund X failed");
         (bool okO, ) = payable(g.playerO).call{value: oAmt}("");
         require(okO, "refund O failed");
+        emit GameEnded(gameId, g.state, address(0), b * 2, 0);
+    }
 
-        emit GameEnded(gameId, g.state, address(0), xAmt + oAmt);
+    /// 判断某方是否还有可能连成一线（任意一行/列/对角无对方棋子即有可能）
+    function canPlayerStillWin(Cell[3][3] memory b, Cell c) internal pure returns (bool) {
+        Cell opp = (c == Cell.X) ? Cell.O : Cell.X;
+        for (uint8 i = 0; i < 3; i++) {
+            if (b[i][0] != opp && b[i][1] != opp && b[i][2] != opp) return true;
+            if (b[0][i] != opp && b[1][i] != opp && b[2][i] != opp) return true;
+        }
+        if (b[0][0] != opp && b[1][1] != opp && b[2][2] != opp) return true;
+        if (b[0][2] != opp && b[1][1] != opp && b[2][0] != opp) return true;
+        return false;
     }
 
     // Win / Draw Detect
