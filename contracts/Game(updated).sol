@@ -229,9 +229,17 @@ contract TicTacToe {
         Game storage g = games[gameId];
         require(g.state == State.Playing, "not playing");
         require(msg.sender == g.playerX || msg.sender == g.playerO, "not player");
-        g.state = State.Draw;
+        address winner = address(0);
+        if (msg.sender == g.playerX) {
+            g.state = State.WinO;
+            winner = g.playerO;
+        } else {
+            g.state = State.WinX;
+            winner = g.playerX;
+        }
+        
         emit Surrendered(gameId, msg.sender);
-        _refundDrawNoFee(g, gameId);
+        _payoutWinner(g, winner, gameId);
     }
 
     /// 超时：60 秒内未操作，当前回合方判负，对方获胜
