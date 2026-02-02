@@ -19,7 +19,7 @@ contract Game {
 
     enum Cell {
         Empty,
-        X,
+        X, 
         O
     }
     enum State {
