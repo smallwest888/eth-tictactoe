@@ -52,32 +52,134 @@ contract TicTacToe {
         Game storage g = games[gameId];
         g.playerX = msg.sender;
         g.bet = msg.value;
+
         g.prizePool = msg.value;
+        g.depositX = msg.value;
+
         g.turn = msg.sender;
         g.state = State.Waiting;
         emit GameCreated(gameId, msg.sender, msg.value);
     }
 
+    // join Game
     function joinGame(uint256 gameId) external payable {
         Game storage g = games[gameId];
         require(g.playerX != address(0), "no game");
         require(g.state == State.Waiting, "not joinable");
         require(g.playerO == address(0), "full");
-        require(msg.sender != g.playerX, "X cannot join");
+        require(msg.sender != g.playerX, "X cannot join again");
         require(msg.value == g.bet, "bet must be matched");
 
         g.playerO = msg.sender;
         g.prizePool += msg.value;
+        g.depositO += msg.value;
+
         g.state = State.Playing;
         g.lastMoveTime = block.timestamp;
 
         emit GameJoined(gameId, msg.sender, msg.value);
     }
 
+    //Initiate a raise: the opponent must match the total deposit before the deadline, otherwise they lose the game
+    function raise(uint256 gameId) external payable{
+        Game storage g = games[gameId];
+
+        require(g.state == State.Playing, "not playing");
+        require(!g.paid, "already paid");
+        require(!g.raiseActive, "raise already active");
+        require(msg.value > 0, "amount > 0");
+        require(msg.sender == g.playerX || msg.sender == g.playerO, "not a player");
+        require(msg.sender == g.turn, "not your turn");
+
+        // Add funds to the prize pool and update deposit accounting 
+        g.prizePool += msg.value;
+
+        if (msg.sender == g.playerX) {
+            g.depositX += msg.value;
+            g.targetDeposit = g.depositX;
+        } else {
+            g.depositO += msg.value;
+            g.targetDeposit = g.depositO;
+        }
+
+        g.raiseActive = true;
+        g.raiser = msg.sender;
+        g.raiseDeadline = block.timestamp + 60;
+
+        emit Raised(gameId, msg.sender, msg.value, g.targetDeposit, g.raiseDeadline);
+    }
+    
+    // match a raise: the opponent must exactly match the targetDeposit
+    function matchRaise(uint256 gameId) external payable{
+        Game storage g = games[gameId];
+
+        require(g.state == State.Playing, "not playing");
+        require(!g.paid, "already paid");
+        require(g.raiseActive, "no active raise");
+        require(block.timestamp <= g.raiseDeadline, "too late");
+        require(msg.sender == g.playerX || msg.sender == g.playerO, "not a player");
+        require(msg.sender != g.raiser, "raiser cannot match");
+
+        // Compute the exact amount required to match the raiser's total deposit
+        uint256 need;
+        if(msg.sender == g.playerX){
+            require(g.targetDeposit >= g.depositX, "internal error");
+            need = g.targetDeposit - g.depositX;
+            require(msg.value == need, "must match exactly");
+            g.depositX += msg.value;
+        } else {
+            require(g.targetDeposit >= g.depositO, "internal error");
+            need = g.targetDeposit - g.depositO;
+            require(msg.value == need, "must match exactly");
+            g.depositO += msg.value;
+        }
+
+        g.prizePool += msg.value;
+
+        // clear raise state 
+        g.raiseActive = false;
+        g.raiser = address(0);
+        g.targetDeposit = 0;
+        g.raiseDeadline = 0;
+
+        emit RaiseMatched(gameId, msg.sender, msg.value, g.depositX, g.depositO);
+
+    }
+
+    // If the opponent failes to match before the deaedline, they lose and the raiser wins the game
+    function lose(uint256 gameId) external{
+        Game storage g = games[gameId];
+
+        require(g.state == State.Playing, "not playing");
+        require(!g.paid, "already paid");
+        require(g.raiseActive, "no active raise");
+        require(block.timestamp > g.raiseDeadline, "not expired");
+
+        address winner = g.raiser;
+        require(winner != address(0), "no rasier");
+        address loser = (winner == g.playerX) ? g.playerO : g.playerX;
+
+        // End the game
+        g.state = (winner == g.playerX) ? State.WinX : State.WinO;
+
+        // clear raise state 
+        g.raiseActive = false;
+        g.raiser = address(0);
+        g.targetDeposit = 0;
+        g.raiseDeadline = 0;
+
+        emit Loss(gameId, loser, winner);
+        payoutWinner(gameId, g, winner);
+
+    }
+
+    
+
     // Move
     function move(uint256 gameId, uint8 x, uint8 y) external nonReentrant {
         Game storage g = games[gameId];
         require(g.state == State.Playing, "the game is not active");
+        require(!g.paid, "already paid");
         require(msg.sender == g.turn, "it is not your turn");
         require(x < 3 && y < 3, "out of bounds");
         require(g.board[x][y] == Cell.Empty, "taken");
@@ -189,7 +291,11 @@ contract TicTacToe {
         if (g.paid) return;
         g.paid = true;
         uint256 amount = g.prizePool;
+
+        // effects first
         g.prizePool = 0;
+        g.depositX = 0;
+        g.depositO = 0;
 
         uint256 fee = (amount * feeBps) / 10000;
         uint256 remaining = amount - fee;
@@ -230,7 +336,7 @@ contract TicTacToe {
         g.prizePool = 0;
         (bool okX, ) = payable(g.playerX).call{value: b}("");
         require(okX, "refund X failed");
-        (bool okO, ) = payable(g.playerO).call{value: b}("");
+        (bool okO, ) = payable(g.playerO).call{value: oAmt}("");
         require(okO, "refund O failed");
         emit GameEnded(gameId, g.state, address(0), b * 2, 0);
     }
@@ -267,3 +373,4 @@ contract TicTacToe {
         return true;
     }
 }
+
