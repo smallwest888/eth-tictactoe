@@ -6,13 +6,18 @@
   <title>Tic Tac Toe Probability Demo</title>
   <style>
     :root {
-      color-scheme: light dark;
+      color-scheme: dark;
+
       --bg: #0f172a;
       --panel: #1e293b;
       --line: #334155;
       --accent: #38bdf8;
       --text: #e2e8f0;
+      --muted: #94a3b8;
+      --danger: #f87171;
+      --warn: #fbbf24;
     }
+    * { box-sizing: border-box; }
     body {
       margin: 0;
       font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
@@ -22,10 +27,8 @@
       justify-content: center;
       padding: 24px;
     }
-    .app {
-      width: min(960px, 100%);
-    }
-    h1 { margin: 0 0 12px 0; font-weight: 700; letter-spacing: 0.5px; }
+    .app { width: min(980px, 100%); }
+    h1 { margin: 0 0 12px 0; font-weight: 700; letter-spacing: 0.4px; }
     .panel {
       background: var(--panel);
       border: 1px solid var(--line);
@@ -38,8 +41,8 @@
       display: grid;
       grid-template-columns: repeat(3, 1fr);
       gap: 8px;
-      width: 300px;
-      margin: 0 auto 12px;
+      width: 280px;
+      margin: 0;
     }
     .cell {
       aspect-ratio: 1 / 1;
@@ -48,7 +51,7 @@
       display: flex;
       align-items: center;
       justify-content: center;
-      font-size: 42px;
+      font-size: 40px;
       cursor: pointer;
       background: rgba(255,255,255,0.03);
       transition: background 120ms ease, transform 80ms ease;
@@ -56,7 +59,9 @@
     .cell:hover { background: rgba(56, 189, 248, 0.08); }
     .cell:active { transform: scale(0.98); }
     .board-wrap { text-align: center; }
-    .stats { display: flex; flex-wrap: wrap; gap: 12px; margin-top: 8px; }
+    .board-with-stats { display: flex; flex-wrap: wrap; gap: 24px; align-items: flex-start; }
+    .board-with-stats .board-wrap { flex: 0 0 auto; }
+    .stats { display: flex; flex-wrap: wrap; gap: 10px; }
     .tag {
       padding: 6px 10px;
       border-radius: 8px;
@@ -64,13 +69,13 @@
       border: 1px solid rgba(56,189,248,0.3);
       font-size: 13px;
     }
-    .controls { display: flex; gap: 10px; flex-wrap: wrap; justify-content: center; }
+    .controls { display: flex; gap: 10px; flex-wrap: wrap; justify-content: flex-start; }
     button {
       background: var(--accent);
       color: #0b1727;
       border: none;
       border-radius: 8px;
-      padding: 10px 14px;
+      padding: 8px 12px;
       font-size: 14px;
       cursor: pointer;
       font-weight: 600;
@@ -82,61 +87,269 @@
     .prob { font-size: 26px; font-weight: 700; color: #7dd3fc; }
     .legend { display: flex; gap: 10px; justify-content: center; margin-top: 6px; font-size: 13px; opacity: 0.85; }
     .legend span { display: inline-flex; align-items: center; gap: 4px; }
+    .connect-prompt { margin: 10px 0; color: var(--muted); font-size: 13px; }
+    .timer-box {
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      padding: 10px 12px;
+      min-width: 220px;
+      background: rgba(255,255,255,0.03);
+    }
+    .timer-value { font-size: 20px; font-weight: 700; color: #7dd3fc; }
+    .timer-value.warn { color: var(--warn); }
+    .timer-value.danger { color: var(--danger); }
+    .panel-hidden { display: none; }
+    .game-locked { opacity: 0.6; pointer-events: none; }
+    .modal-overlay {
+      position: fixed;
+      inset: 0;
+      background: rgba(15, 23, 42, 0.75);
+      display: none;
+      align-items: center;
+      justify-content: center;
+      padding: 20px;
+      z-index: 50;
+    }
+    .modal-overlay.open { display: flex; }
+    .modal {
+      width: min(720px, 100%);
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      padding: 16px;
+      box-shadow: 0 20px 60px rgba(0,0,0,0.45);
+    }
+    .modal-close {
+      position: absolute;
+      top: 8px;
+      right: 10px;
+      background: transparent;
+      color: var(--text);
+      border: none;
+      font-size: 22px;
+      cursor: pointer;
+      box-shadow: none;
+    }
+    .creating-overlay {
+      position: absolute;
+      inset: 0;
+      background: rgba(15, 23, 42, 0.75);
+      display: none;
+      align-items: center;
+      justify-content: center;
+      flex-direction: column;
+      gap: 8px;
+      border-radius: 12px;
+      z-index: 10;
+    }
+    .creating-overlay.visible { display: flex; }
+    .creating-spinner {
+      width: 24px;
+      height: 24px;
+      border: 3px solid rgba(255,255,255,0.2);
+      border-top-color: var(--accent);
+      border-radius: 50%;
+      animation: spin 1s linear infinite;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    table { width: 100%; border-collapse: collapse; }
+    th, td { padding: 8px; border-bottom: 1px solid var(--line); text-align: left; font-size: 13px; }
   </style>
 </head>
 <body>
   <div class="app">
     <h1>Tic Tac Toe (Player Black ●, Computer White ○)</h1>
-    <div class="panel board-wrap">
-      <div class="grid" id="board"></div>
-      <div class="legend">
-        <span>Player: ● (first)</span>
-        <span>Computer: ○ (random block)</span>
+
+    <div class="panel">
+      <h2 style="margin-top:0;">Connect to start</h2>
+      <p style="margin:0 0 8px 0; font-size:0.9em; color:var(--muted);">
+        Contracts deployed on Remix VM cannot be used by this page. Run <code>npx hardhat node</code>,
+        then <code>npx hardhat run scripts/deploy-tictactoe.js --network local</code>, and click «Use Demo Address».
+      </p>
+      <div class="controls" style="gap:8px;">
+        <button id="connect">Connect Wallet</button>
+        <button id="set-address">Use Demo Address</button>
+        <button id="deploy-contract">Deploy new contract</button>
       </div>
-      <div class="controls" style="margin-top: 12px;">
-        <button id="reset">Reset game</button>
+      <div style="margin-top:12px;">
+        <div class="label">Contract address (optional, override default):</div>
+        <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin-top:6px;">
+          <input id="contract-address-input" type="text" placeholder="0x..." style="flex:1; min-width:280px; padding:8px; border-radius:8px; border:1px solid var(--line); font-family:monospace;">
+          <button id="apply-contract">Use this contract</button>
+        </div>
+        <div id="contract-address-error" style="margin-top:4px; font-size:13px; color:#f87171;"></div>
       </div>
-      <div style="margin-top: 10px;">
-        <div class="label">Turn: <span id="turn-label"></span></div>
-        <div class="label">Result: <span id="state-label">Playing</span></div>
-        <div class="label">Player eventual win rate (policies continue):</div>
-        <div class="prob" id="prob-label">--%</div>
+      <div class="label" style="margin-top:8px;">Active contract: <code id="contract-address">N/A</code></div>
+      <div class="label" id="chain-label">Chain: not connected</div>
+      <div class="label" id="account-label">Account: not connected</div>
+      <div style="margin-top:12px;">
+        <div class="label">Computer account (AI wins → this address)</div>
+        <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin-top:4px;">
+          <code id="computer-account-addr" style="font-size:12px;"></code>
+          <button id="use-computer">Use Computer Account</button>
+          <button id="view-balances">View all balances</button>
+        </div>
       </div>
+    </div>
+
+    <div class="panel" id="game-area">
+      <div class="connect-prompt" id="connect-prompt">Connect a wallet or use Demo Address, then create or join a game with ETH to unlock the board.</div>
+      <div class="board-with-stats">
+        <div class="board-wrap">
+          <div class="grid" id="board"></div>
+          <div class="legend">
+            <span>Player: ● (first)</span>
+            <span>Computer: ○ (random block)</span>
+          </div>
+          <div style="margin-top: 10px;">
+            <div class="label">Turn: <span id="turn-label"></span></div>
+            <div class="label">Result: <span id="state-label">Playing</span></div>
+            <div class="label">Player eventual win rate (policies continue):</div>
+            <div class="prob" id="prob-label">--%</div>
+          </div>
+        </div>
+        <div style="flex:1 1 260px; min-width:260px;">
+          <div class="label" style="margin-bottom:8px;">Precomputed (symmetry de-duplicated):</div>
+          <div class="stats">
+            <div class="tag">Unique states: <span id="unique-states">-</span></div>
+            <div class="tag">Terminal states: <span id="terminal-states">-</span></div>
+          </div>
+          <div class="timer-box" style="margin-top:14px;">
+            <div class="label" style="margin-bottom:4px;">Move timer (on-chain rule)</div>
+            <div id="timer-value" class="timer-value">60 s per move</div>
+            <div class="label" style="font-size:12px; color:var(--muted); margin-top:4px;">
+              If no move within 60s, current player loses (claimTimeout).
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="panel panel-hidden" id="on-chain-demo-panel">
+      <h2 style="margin-top:0;">On-chain Demo (Hardhat/Geth local)</h2>
+      <p class="label" style="font-size:12px; color:var(--muted); margin-bottom:8px;">
+        Moves are recorded on-chain. Winners are paid automatically and Dev gets the fee each game.
+      </p>
+      <div class="label" style="margin-bottom:8px;">Current game ID: <strong id="current-game-id">—</strong> <span style="color:var(--muted); font-size:12px;">(set after you create or join a game; used for Give up / Timeout)</span></div>
+      <button id="open-create-join-modal" style="margin-bottom:12px;">Create game / Join game</button>
+      <div style="display:flex; flex-wrap:wrap; gap:12px; align-items:flex-end; margin-top:12px;">
+        <div style="margin-left:8px;">
+          <span class="label">Give up (surrender = draw)</span>
+          <input id="surrender-id" type="number" min="1" placeholder="Game ID" style="width:80px; padding:8px; border-radius:8px; border:1px solid var(--line); margin-left:4px;">
+          <button id="surrender-btn" style="margin-left:4px;">surrender</button>
+        </div>
+        <div style="margin-left:8px;">
+          <span class="label">Timeout</span>
+          <input id="timeout-id" type="number" min="1" placeholder="Game ID" style="width:80px; padding:8px; border-radius:8px; border:1px solid var(--line); margin-left:4px;">
+          <button id="timeout-btn" style="margin-left:4px;">claimTimeout</button>
+        </div>
+      </div>
+      <div class="label" style="margin-top:10px;">Status:</div>
+      <div id="status" style="padding:10px; border:1px solid var(--line); border-radius:8px; min-height:40px; background:rgba(255,255,255,0.03);"></div>
     </div>
 
     <div class="panel">
-      <div class="label" style="margin-bottom: 8px;">Precomputed (symmetry de-duplicated):</div>
-      <div class="stats">
-        <div class="tag">Unique states: <span id="unique-states">-</span></div>
-        <div class="tag">Terminal states: <span id="terminal-states">-</span></div>
+      <h2 style="margin-top:0;">Balances & Probability Log</h2>
+      <div style="display:flex; flex-wrap:wrap; gap:12px;">
+        <div style="flex:1 1 260px; min-width:260px;">
+          <div class="label">Signer balance (ETH): <span id="signer-balance">-</span></div>
+          <div class="label">Contract balance (ETH): <span id="contract-balance">-</span></div>
+          <div class="label">Dev balance (ETH): <span id="dev-balance">-</span></div>
+          <button id="refresh-bal" style="margin-top:6px;">Refresh balances</button>
+        </div>
+        <div style="flex:2 1 320px; min-width:320px;">
+          <div class="label">Recent probability snapshots (board changed):</div>
+          <div id="prob-log" style="margin-top:6px; padding:10px; border:1px solid var(--line); border-radius:8px; min-height:60px; background:rgba(255,255,255,0.03); font-size:13px; line-height:1.5;"></div>
+        </div>
       </div>
-      <p style="margin-top: 12px; line-height: 1.6;">
-        On load, the page traverses the full tic tac toe game space, normalizes by the eight rotations/flips, and records the set of unique states.
-        For probability: from the current board, recursively enumerate future plays. Player picks uniformly among legal moves; the computer first takes a winning move if available, else randomly blocks the player's immediate win squares, else picks randomly.
-        Probability is the uniform average over legal continuations; draws count as 0, making the result deterministic and reproducible.
-      </p>
     </div>
   </div>
 
+  <div id="create-join-modal" class="modal-overlay" aria-hidden="true">
+    <div class="modal" style="position:relative;">
+      <div id="creating-overlay" class="creating-overlay" aria-hidden="true">
+        <div class="creating-spinner"></div>
+        <div class="creating-text">Creating game…</div>
+        <div class="label" style="font-size:12px; color:var(--muted);">Waiting for confirmation. Game will unlock when ready.</div>
+      </div>
+      <button id="close-create-join-modal" class="modal-close" aria-label="Close">×</button>
+      <h3>Create or join a game</h3>
+      <div class="section" style="display:flex; flex-wrap:wrap; gap:12px;">
+        <div style="flex:1 1 260px; min-width:260px;">
+          <div class="label">Create Game (player X) — stake in ETH</div>
+          <input id="stake-input" type="number" min="0" step="0.01" placeholder="0.1" style="width:100%; padding:8px; border-radius:8px; border:1px solid var(--line); margin-top:6px;">
+          <button id="create-game" style="margin-top:6px;">createGame</button>
+        </div>
+        <div style="flex:1 1 260px; min-width:260px;">
+          <div class="label">Join Game (player O) — match stake</div>
+          <input id="join-id" type="number" min="1" step="1" placeholder="Game ID" style="width:100%; padding:8px; border-radius:8px; border:1px solid var(--line); margin-top:6px;">
+          <input id="join-stake" type="number" min="0" step="0.01" placeholder="0.1" style="width:100%; padding:8px; border-radius:8px; border:1px solid var(--line); margin-top:6px;">
+          <button id="join-game" style="margin-top:6px;">joinGame</button>
+        </div>
+        <div style="flex:1 1 260px; min-width:260px;">
+          <div class="label">Computer join (demo only)</div>
+          <button id="computer-join" style="margin-top:6px;">Computer join last game</button>
+          <div class="label" style="font-size:12px; color:var(--muted); margin-top:6px;">Uses computer account to match stake.</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div id="balances-modal" class="modal-overlay" aria-hidden="true">
+    <div class="modal" style="position:relative;">
+      <button id="close-balances-modal" class="modal-close" aria-label="Close">×</button>
+      <h3>All balances</h3>
+      <table>
+        <thead>
+          <tr><th>Account</th><th>Address</th><th>Balance (ETH)</th></tr>
+        </thead>
+        <tbody id="balances-table-body"></tbody>
+      </table>
+      <div style="margin-top:12px;">
+        <button id="refresh-balances-modal">Refresh balances</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="https://cdn.jsdelivr.net/npm/ethers@6.11.1/dist/ethers.umd.min.js"></script>
+  <script src="game-bytecode.js"></script>
+  <script src="tictactoe-bytecode.js"></script>
   <script>
-    const PLAYER = "X"; // player black (●)
-    const AI = "O";     // computer white (○)
+    let CONTRACT_ADDRESS = "0x5FbDB2315678afecb367f032d93F642f64180aa3";
+    const DEMO_ACCOUNT_PK = "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80";
+    const COMPUTER_ACCOUNT_PK = "0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d";
+    const COMPUTER_ACCOUNT_ADDRESS = "0x70997970C51812dc3A010C7d01b50e0d17dc79C8";
+    const DEV_ACCOUNT_ADDRESS = "0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC";
+
+    let provider;
+    let signer;
+    let contract;
+    let isLocalNode = false;
+    let lastGameId = null;
+    let lastStakeWei = 0n;
+    let userHasStaked = false;
+    let autoComputerJoin = false;
+
+    const PLAYER = "X";
+    const AI = "O";
     const EMPTY = " ";
+    const MOVE_TIMEOUT_SEC = 60;
+
     const winningLines = [
-      [0,1,2],[3,4,5],[6,7,8], // rows
-      [0,3,6],[1,4,7],[2,5,8], // cols
-      [0,4,8],[2,4,6]          // diagonals
+      [0,1,2],[3,4,5],[6,7,8],
+      [0,3,6],[1,4,7],[2,5,8],
+      [0,4,8],[2,4,6]
     ];
 
     const transforms = [
-      [0,1,2,3,4,5,6,7,8],                // identity
-      [6,3,0,7,4,1,8,5,2],                // rotate 90
-      [8,7,6,5,4,3,2,1,0],                // rotate 180
-      [2,5,8,1,4,7,0,3,6],                // rotate 270
-      [2,1,0,5,4,3,8,7,6],                // vertical flip
-      [6,7,8,3,4,5,0,1,2],                // horizontal flip
-      [0,3,6,1,4,7,2,5,8],                // main diagonal flip
-      [8,5,2,7,4,1,6,3,0]                 // anti-diagonal flip
+      [0,1,2,3,4,5,6,7,8],
+      [6,3,0,7,4,1,8,5,2],
+      [8,7,6,5,4,3,2,1,0],
+      [2,5,8,1,4,7,0,3,6],
+      [2,1,0,5,4,3,8,7,6],
+      [6,7,8,3,4,5,0,1,2],
+      [0,3,6,1,4,7,2,5,8],
+      [8,5,2,7,4,1,6,3,0]
     ];
 
     const boardEl = document.getElementById("board");
@@ -145,12 +358,43 @@
     const probLabel = document.getElementById("prob-label");
     const uniqueStatesEl = document.getElementById("unique-states");
     const terminalStatesEl = document.getElementById("terminal-states");
-    const resetBtn = document.getElementById("reset");
+    const connectBtn = document.getElementById("connect");
+    const setAddrBtn = document.getElementById("set-address");
+    const createBtn = document.getElementById("create-game");
+    const joinBtn = document.getElementById("join-game");
+    const contractEl = document.getElementById("contract-address");
+    const chainEl = document.getElementById("chain-label");
+    const accountEl = document.getElementById("account-label");
+    const statusEl = document.getElementById("status");
+    const signerBalEl = document.getElementById("signer-balance");
+    const contractBalEl = document.getElementById("contract-balance");
+    const devBalEl = document.getElementById("dev-balance");
+    const refreshBalBtn = document.getElementById("refresh-bal");
+    const probLogEl = document.getElementById("prob-log");
+    const gameAreaEl = document.getElementById("game-area");
+    const connectPromptEl = document.getElementById("connect-prompt");
+    const timerValueEl = document.getElementById("timer-value");
+    const contractAddressInputEl = document.getElementById("contract-address-input");
+    const contractAddressErrorEl = document.getElementById("contract-address-error");
+    const createJoinModalEl = document.getElementById("create-join-modal");
+    const onChainDemoPanelEl = document.getElementById("on-chain-demo-panel");
+    const currentGameIdEl = document.getElementById("current-game-id");
+    const computerAccountAddrEl = document.getElementById("computer-account-addr");
+    const balancesModalEl = document.getElementById("balances-modal");
+    const balancesTableBodyEl = document.getElementById("balances-table-body");
 
     let board = Array(9).fill(EMPTY);
-    let turn = PLAYER; // player moves first
+    let turn = PLAYER;
     let memoProb = new Map();
     let precomputedStates;
+    let probHistory = [];
+    let lastLoggedBoard = "";
+    let timerSeconds = MOVE_TIMEOUT_SEC;
+    let timerInterval = null;
+    let balanceInterval = null;
+    let onChainState = 1; // 1 = Playing
+    let timeoutTriggered = false;
+    let forcedOutcome = null; // "X" or "O" when win prob hits 0
 
     function applyTransform(boardStr, map) {
       return map.map(i => boardStr[i]).join("");
@@ -181,7 +425,7 @@
     }
 
     function generateStateSpace() {
-      const visited = new Map(); // canonical -> {board, turn, winner}
+      const visited = new Map();
       const queue = [{ board: EMPTY.repeat(9), turn: PLAYER }];
       while (queue.length) {
         const state = queue.shift();
@@ -253,7 +497,6 @@
         }
         prob = moves.length ? sum / moves.length : 0;
       } else {
-        // Computer mixes between random play and block-first policy (50/50).
         const policies = [
           blockPolicyMoves(boardStr),
           randomPolicyMoves(boardStr)
@@ -285,47 +528,533 @@
         boardEl.appendChild(div);
       });
       turnLabel.textContent = turn === PLAYER ? "Player (Black ●)" : "Computer (White ○)";
-      const status = checkWinner(board.join(""));
-      if (status === PLAYER) stateLabel.textContent = "Player wins";
-      else if (status === AI) stateLabel.textContent = "Computer wins";
-      else if (status === "Draw") stateLabel.textContent = "Draw";
+      if (onChainState === 3) stateLabel.textContent = "Player wins";
+      else if (onChainState === 4) stateLabel.textContent = "Computer wins";
+      else if (onChainState === 2) stateLabel.textContent = "Draw";
       else stateLabel.textContent = "Playing";
 
       const prob = probPlayerWin(board.join(""), turn);
+      if (onChainState === 1 && prob === 0) {
+        forcedOutcome = turn === PLAYER ? AI : PLAYER;
+        stateLabel.textContent = forcedOutcome === PLAYER ? "Player wins (forced)" : "Computer wins (forced)";
+        stopTimer();
+      } else {
+        forcedOutcome = null;
+      }
       probLabel.textContent = (prob * 100).toFixed(1) + "%";
-    }
 
-    function handlePlayerMove(idx) {
-      if (turn !== PLAYER) return;
-      if (board[idx] !== EMPTY) return;
-      if (checkWinner(board.join(""))) return;
-      board[idx] = PLAYER;
-      turn = nextTurn(turn);
-      render();
-      // Auto trigger computer move if game not finished.
-      if (!checkWinner(board.join("")) && turn === AI) {
-        handleAIMove();
+      const boardStr = board.join("");
+      if (boardStr !== lastLoggedBoard) {
+        lastLoggedBoard = boardStr;
+        probHistory.unshift({ board: boardStr, prob });
+        if (probHistory.length > 10) probHistory.pop();
+        const rows = probHistory.map((item, idx) => {
+          const pretty = item.board.replace(/ /g, "·");
+          return `${idx + 1}. prob=${(item.prob * 100).toFixed(1)}% board=${pretty}`;
+        });
+        probLogEl.textContent = rows.join("\n");
       }
     }
 
-    function handleAIMove() {
+    async function handlePlayerMove(idx) {
+      if (!contract) return;
+      if (turn !== PLAYER) return;
+      if (board[idx] !== EMPTY) return;
+      if (onChainState !== 1) return;
+      if (lastGameId == null || isNaN(Number(lastGameId))) {
+        return setStatus("Game ID unknown. Create/join first and wait for confirmation.");
+      }
+      if (probPlayerWin(board.join(""), turn) === 0) {
+        stopTimer();
+        return setStatus("Win probability is 0. Game already decided.");
+      }
+      stopTimer();
+
+      const x = Math.floor(idx / 3), y = idx % 3;
+      setStatus("Submitting move on-chain…");
+      try {
+        const tx = await contract.move(lastGameId, x, y);
+        await tx.wait();
+        await syncBoardFromChain();
+        if (onChainState === 1 && turn === AI) await handleAIMove();
+      } catch (e) {
+        setStatus("move failed: " + (e.shortMessage || e.message));
+      }
+    }
+
+    async function handleAIMove() {
       if (turn !== AI) return;
-      if (checkWinner(board.join(""))) return;
+      if (onChainState !== 1) return;
+      if (!provider || !isLocalNode) return;
+      if (lastGameId == null || isNaN(Number(lastGameId))) return;
+      if (probPlayerWin(board.join(""), turn) === 0) {
+        stopTimer();
+        return;
+      }
+      stopTimer();
       const strategies = [blockPolicyMoves, randomPolicyMoves];
       const strat = strategies[Math.floor(Math.random() * strategies.length)];
       const moves = strat(board.join(""));
       if (!moves.length) return;
       const choice = moves[Math.floor(Math.random() * moves.length)];
-      board[choice] = AI;
-      turn = nextTurn(turn);
-      render();
+      const x = Math.floor(choice / 3), y = choice % 3;
+      setStatus("Computer submitting move on-chain…");
+      try {
+        const computerSigner = new ethers.Wallet(COMPUTER_ACCOUNT_PK, provider);
+        const computerContract = new ethers.Contract(CONTRACT_ADDRESS, ABI, computerSigner);
+        const tx = await computerContract.move(lastGameId, x, y);
+        await tx.wait();
+        await syncBoardFromChain();
+      } catch (e) {
+        setStatus("Computer move failed: " + (e.shortMessage || e.message));
+      }
     }
 
-    function reset() {
-      board = Array(9).fill(EMPTY);
-      turn = PLAYER;
-      memoProb.clear();
-      render();
+    function stopTimer() {
+      if (timerInterval) {
+        clearInterval(timerInterval);
+        timerInterval = null;
+      }
+      timerSeconds = MOVE_TIMEOUT_SEC;
+      timeoutTriggered = false;
+      if (timerValueEl) {
+        timerValueEl.textContent = MOVE_TIMEOUT_SEC + " s per move";
+        timerValueEl.classList.remove("warn", "danger");
+      }
+    }
+
+    function startTimer() {
+      if (!timerValueEl) return;
+      if (timerInterval) clearInterval(timerInterval);
+      function tick() {
+        if (timerSeconds <= 0) {
+          timerValueEl.textContent = "Time's up!";
+          timerValueEl.classList.add("danger");
+          if (!timeoutTriggered && lastGameId != null && contract) {
+            timeoutTriggered = true;
+            contract.claimTimeout(lastGameId).then(() => {
+              setStatus("Timeout claimed. Current player loses.");
+              syncBoardFromChain();
+            }).catch(() => {});
+          }
+          return;
+        }
+        timerValueEl.textContent = timerSeconds + " s";
+        timerValueEl.classList.toggle("warn", timerSeconds <= 15);
+        timerValueEl.classList.toggle("danger", timerSeconds <= 5);
+        timerSeconds--;
+      }
+      tick();
+      timerInterval = setInterval(tick, 1000);
+    }
+
+    function updateGameLock() {
+      const canPlay = !!contract && userHasStaked;
+      if (gameAreaEl) gameAreaEl.classList.toggle("game-locked", !canPlay);
+      if (connectPromptEl) {
+        connectPromptEl.style.display = "block";
+        if (!contract) connectPromptEl.textContent = "Connect a wallet or use Demo Address, then create or join a game with ETH to unlock the board.";
+        else if (!userHasStaked) connectPromptEl.textContent = "Create or join a game with ETH to unlock the board.";
+        else connectPromptEl.style.display = "none";
+      }
+    }
+
+    function showOnChainDemoPanel() {
+      if (onChainDemoPanelEl) onChainDemoPanelEl.classList.remove("panel-hidden");
+    }
+
+    function startBalanceRefresh() {
+      if (balanceInterval) return;
+      balanceInterval = setInterval(() => {
+        refreshBalances();
+      }, 12000);
+    }
+
+    function syncGameIdToInputs() {
+      const id = lastGameId != null ? String(lastGameId) : "";
+      if (currentGameIdEl) currentGameIdEl.textContent = id || "—";
+      const surrenderId = document.getElementById("surrender-id");
+      const timeoutId = document.getElementById("timeout-id");
+      if (surrenderId) surrenderId.value = id;
+      if (timeoutId) timeoutId.value = id;
+    }
+
+    async function syncBoardFromChain() {
+      if (!contract || lastGameId == null) return;
+      try {
+        const flat = await contract.getBoard(lastGameId);
+        const g = await contract.getGame(lastGameId);
+        const turnAddr = g[4] ?? g.turn;
+        const state = Number(g[5] ?? g.state ?? 1);
+        const lastMoveTime = Number(g[7] ?? g.lastMoveTime ?? 0);
+        const playerX = String((g[0] ?? g.playerX) ?? "").toLowerCase();
+        for (let i = 0; i < 9; i++) {
+          const c = Number(Array.isArray(flat) ? flat[i] : flat && flat[i]);
+          board[i] = c === 0 ? EMPTY : c === 1 ? PLAYER : AI;
+        }
+        turn = (turnAddr && playerX && String(turnAddr).toLowerCase() === playerX) ? PLAYER : AI;
+        onChainState = state;
+
+        if (state === 1 && lastMoveTime > 0) {
+          const now = Math.floor(Date.now() / 1000);
+          timerSeconds = Math.max(0, MOVE_TIMEOUT_SEC - (now - lastMoveTime));
+          startTimer();
+        } else {
+          stopTimer();
+        }
+        render();
+      } catch (e) {
+        setStatus("syncBoard failed: " + (e.shortMessage || e.message));
+      }
+    }
+
+    function setStatus(msg) {
+      if (statusEl) statusEl.textContent = msg;
+    }
+
+    function ensureEthers() {
+      if (!window.ethers) throw new Error("ethers not loaded");
+    }
+
+    async function connectWallet() {
+      try {
+        ensureEthers();
+        if (!window.ethereum) {
+          setStatus("No injected wallet. Install MetaMask or use «Use Demo Address» for local node.");
+          return;
+        }
+        const walletProvider = new ethers.BrowserProvider(window.ethereum);
+        isLocalNode = false;
+        const accounts = await walletProvider.send("eth_requestAccounts", []);
+        signer = await walletProvider.getSigner();
+        provider = walletProvider;
+        contract = new ethers.Contract(CONTRACT_ADDRESS, ABI, signer);
+        const network = await provider.getNetwork();
+        contractEl.textContent = CONTRACT_ADDRESS;
+        chainEl.textContent = `Chain: ${network.name} (${network.chainId})`;
+        accountEl.textContent = `Account: ${accounts[0]}`;
+        setStatus("Wallet connected.");
+        updateGameLock();
+        refreshBalances();
+        startBalanceRefresh();
+        showOnChainDemoPanel();
+      } catch (e) {
+        setStatus(`Connect failed: ${e.message}`);
+      }
+    }
+
+    async function useDemoAddress() {
+      try {
+        ensureEthers();
+        provider = new ethers.JsonRpcProvider("http://127.0.0.1:8545");
+        isLocalNode = true;
+        signer = new ethers.Wallet(DEMO_ACCOUNT_PK, provider);
+        contract = new ethers.Contract(CONTRACT_ADDRESS, ABI, signer);
+        const network = await provider.getNetwork();
+        contractEl.textContent = CONTRACT_ADDRESS;
+        chainEl.textContent = `Chain: ${network.name} (${network.chainId})`;
+        accountEl.textContent = `Account: ${await signer.getAddress()}`;
+        autoComputerJoin = true;
+        setStatus("Using local demo account (Hardhat node #0).");
+        updateGameLock();
+        refreshBalances();
+        startBalanceRefresh();
+        showOnChainDemoPanel();
+      } catch (e) {
+        setStatus(`Set demo address failed: ${e.message}`);
+      }
+    }
+
+    async function useComputerAccount() {
+      if (!provider) return setStatus("Connect or use demo address first.");
+      try {
+        signer = new ethers.Wallet(COMPUTER_ACCOUNT_PK, provider);
+        contract = new ethers.Contract(CONTRACT_ADDRESS, ABI, signer);
+        accountEl.textContent = `Account: ${await signer.getAddress()} (Computer)`;
+        setStatus("Switched to computer account.");
+        refreshBalances();
+      } catch (e) {
+        setStatus("Switch to computer failed: " + (e.shortMessage || e.message));
+      }
+    }
+
+    async function applyContractAddress() {
+      const addr = (contractAddressInputEl?.value || "").trim();
+      if (!addr) return;
+      try {
+        CONTRACT_ADDRESS = ethers.getAddress(addr);
+        contract = signer ? new ethers.Contract(CONTRACT_ADDRESS, ABI, signer) : null;
+        if (contractEl) contractEl.textContent = CONTRACT_ADDRESS;
+        contractAddressErrorEl.textContent = "";
+        setStatus("Contract address updated.");
+        refreshBalances();
+        startBalanceRefresh();
+        showOnChainDemoPanel();
+      } catch (e) {
+        contractAddressErrorEl.textContent = "Invalid address: " + (e.shortMessage || e.message);
+      }
+    }
+
+    async function deployNewContract() {
+      if (!signer) return setStatus("Connect a wallet or Use Demo Address first.");
+      const useTicTacToe = typeof window.TICTACTOE_BYTECODE !== "undefined" && (window.TICTACTOE_BYTECODE || "").length > 10;
+      const bytecode = useTicTacToe ? window.TICTACTOE_BYTECODE : (typeof window.GAME_BYTECODE !== "undefined" ? window.GAME_BYTECODE : "");
+      if (!bytecode || bytecode.length < 10) {
+        setStatus("Run: npx hardhat compile && node scripts/export-tictactoe-bytecode.js then reload.");
+        return;
+      }
+      try {
+        setStatus("Deploying new TicTacToe contract (moves on-chain)…");
+        const factory = new ethers.ContractFactory(ABI, bytecode, signer);
+        const deployed = await factory.deploy(DEV_ACCOUNT_ADDRESS);
+        await deployed.waitForDeployment();
+        const addr = await deployed.getAddress();
+        CONTRACT_ADDRESS = addr;
+        contract = new ethers.Contract(CONTRACT_ADDRESS, ABI, signer);
+        if (contractEl) contractEl.textContent = CONTRACT_ADDRESS;
+        if (contractAddressInputEl) contractAddressInputEl.value = addr;
+        contractAddressErrorEl.textContent = "";
+        setStatus("Contract deployed at " + addr + " (TicTacToe: on-chain moves)");
+        updateGameLock();
+        refreshBalances();
+        startBalanceRefresh();
+        showOnChainDemoPanel();
+      } catch (e) {
+        setStatus("Deploy failed: " + (e.shortMessage || e.message));
+      }
+    }
+
+    function openCreateJoinModal() {
+      if (createJoinModalEl) {
+        createJoinModalEl.classList.add("open");
+        createJoinModalEl.setAttribute("aria-hidden", "false");
+      }
+    }
+    function closeCreateJoinModal() {
+      if (createJoinModalEl) {
+        createJoinModalEl.classList.remove("open");
+        createJoinModalEl.setAttribute("aria-hidden", "true");
+      }
+    }
+
+    const creatingOverlayEl = document.getElementById("creating-overlay");
+    async function createGameOnChain() {
+      if (!contract) return setStatus("Connect wallet first.");
+      const stake = document.getElementById("stake-input").value || "0";
+      const stakeWei = ethers.parseEther(stake);
+      if (stakeWei === 0n) return setStatus("Enter stake > 0 ETH to create a game.");
+      if (creatingOverlayEl) {
+        creatingOverlayEl.classList.add("visible");
+        creatingOverlayEl.setAttribute("aria-hidden", "false");
+      }
+      if (createBtn) {
+        createBtn.disabled = true;
+        createBtn.textContent = "Creating…";
+      }
+      try {
+        setStatus("Creating game… waiting for confirmation.");
+        const tx = await contract.createGame({ value: stakeWei });
+        setStatus("Transaction sent. Waiting for confirmation…");
+        const receipt = await tx.wait();
+        let gameId = null;
+        if (receipt?.logs?.length) {
+          for (const log of receipt.logs) {
+            try {
+              const parsed = contract.interface.parseLog(log);
+              if (parsed && parsed.name === "GameCreated") {
+                gameId = parsed.args.gameId.toString();
+                break;
+              }
+            } catch (_) {}
+          }
+        }
+        if (!gameId) {
+          try { gameId = (await contract.gameCount()).toString(); } catch (_) {}
+        }
+        if (!gameId) {
+          setStatus("createGame confirmed but gameId not found. Check contract address.");
+          return;
+        }
+        lastGameId = gameId;
+        userHasStaked = true;
+        lastStakeWei = stakeWei;
+        syncGameIdToInputs();
+        updateGameLock();
+        await refreshBalances();
+        await syncBoardFromChain();
+        setStatus(`Game created. gameId=${gameId}. Board unlocked.`);
+        closeCreateJoinModal();
+        if (autoComputerJoin) await computerJoinLastGame();
+      } catch (e) {
+        setStatus(`createGame failed: ${e.shortMessage || e.message}`);
+      } finally {
+        if (creatingOverlayEl) {
+          creatingOverlayEl.classList.remove("visible");
+          creatingOverlayEl.setAttribute("aria-hidden", "true");
+        }
+        if (createBtn) {
+          createBtn.disabled = false;
+          createBtn.textContent = "createGame";
+        }
+      }
+    }
+
+    async function joinGameOnChain() {
+      if (!contract) return setStatus("Connect wallet first.");
+      const gid = document.getElementById("join-id").value;
+      const stake = document.getElementById("join-stake").value || "0";
+      const stakeWei = ethers.parseEther(stake);
+      if (stakeWei === 0n) return setStatus("Enter stake > 0 ETH to join a game.");
+      try {
+        setStatus("Sending tx joinGame...");
+        const tx = await contract.joinGame(gid, { value: stakeWei });
+        const receipt = await tx.wait();
+        lastGameId = String(gid);
+        userHasStaked = true;
+        lastStakeWei = stakeWei;
+        syncGameIdToInputs();
+        updateGameLock();
+        await refreshBalances();
+        await syncBoardFromChain();
+        setStatus(`joinGame done. tx=${receipt.hash}. Board unlocked.`);
+        closeCreateJoinModal();
+      } catch (e) {
+        setStatus(`joinGame failed: ${e.shortMessage || e.message}`);
+      }
+    }
+
+    async function computerJoinLastGame() {
+      if (!provider || !isLocalNode) return setStatus("Use Demo Address first (local node).");
+      if (lastGameId == null || lastStakeWei === 0n) return setStatus("Create a game first so computer can join with same stake.");
+      try {
+        const computerSigner = new ethers.Wallet(COMPUTER_ACCOUNT_PK, provider);
+        const computerContract = new ethers.Contract(CONTRACT_ADDRESS, ABI, computerSigner);
+        setStatus("Computer joining game " + lastGameId + " with same stake...");
+        const tx = await computerContract.joinGame(lastGameId, { value: lastStakeWei });
+        await tx.wait();
+        setStatus("Computer joined game " + lastGameId + ". Both sides staked same amount.");
+        await refreshBalances();
+        await syncBoardFromChain();
+        closeCreateJoinModal();
+      } catch (e) {
+        setStatus("Computer join failed: " + (e.shortMessage || e.message));
+      }
+    }
+
+    async function surrenderOnChain() {
+      if (!contract) return setStatus("Connect wallet first.");
+      const gidRaw = document.getElementById("surrender-id").value;
+      if (gidRaw === "" || gidRaw == null) return setStatus("Enter Game ID for surrender.");
+      const gameId = BigInt(gidRaw);
+      try {
+        setStatus("Sending tx surrender (draw)...");
+        const tx = await contract.surrender(gameId);
+        const receipt = await tx.wait();
+        setStatus("Surrender done. Treated as draw; both refunded. tx=" + receipt.hash);
+        await refreshBalances();
+        await syncBoardFromChain();
+      } catch (e) {
+        setStatus("surrender failed: " + (e.shortMessage || e.message));
+      }
+    }
+
+    async function claimTimeoutOnChain() {
+      if (!contract) return setStatus("Connect wallet first.");
+      const gidRaw = document.getElementById("timeout-id").value;
+      if (gidRaw === "" || gidRaw == null) return setStatus("Enter Game ID for timeout.");
+      const gameId = BigInt(gidRaw);
+      try {
+        setStatus("Sending tx claimTimeout...");
+        const tx = await contract.claimTimeout(gameId);
+        const receipt = await tx.wait();
+        setStatus("Timeout claimed. tx=" + receipt.hash);
+        await refreshBalances();
+        await syncBoardFromChain();
+      } catch (e) {
+        setStatus("claimTimeout failed: " + (e.shortMessage || e.message));
+      }
+    }
+
+    const ABI = [
+      "function dev() view returns (address)",
+      "function feeBps() view returns (uint256)",
+      "function gameCount() view returns (uint256)",
+      "function createGame() payable returns (uint256)",
+      "function joinGame(uint256 gameId) payable",
+      "function move(uint256 gameId, uint8 x, uint8 y)",
+      "function getGame(uint256 gameId) view returns (address playerX, address playerO, uint256 bet, uint256 prizePool, address turn, uint8 state, bool paid, uint256 lastMoveTime)",
+      "function getBoard(uint256 gameId) view returns (uint8[9])",
+      "function surrender(uint256 gameId)",
+      "function claimTimeout(uint256 gameId)",
+      "function claim(uint256 gameId)",
+      "event GameCreated(uint256 indexed gameId, address indexed playerX, uint256 bet)",
+      "event GameJoined(uint256 indexed gameId, address indexed playerO, uint256 bet)",
+      "event MoveMade(uint256 indexed gameId, address indexed player, uint8 x, uint8 y, uint8 cell)",
+      "event GameEnded(uint256 indexed gameId, uint8 result, address winner, uint256 payout, uint256 devFee)"
+    ];
+
+    async function refreshBalances() {
+      if (!provider || !signer) {
+        if (signerBalEl) signerBalEl.textContent = "-";
+        if (contractBalEl) contractBalEl.textContent = "-";
+        if (devBalEl) devBalEl.textContent = "-";
+        return;
+      }
+      try {
+        const addrs = [CONTRACT_ADDRESS, DEV_ACCOUNT_ADDRESS];
+        const bals = await Promise.all(addrs.map(a => provider.getBalance(a)));
+        if (contractBalEl) contractBalEl.textContent = Number(ethers.formatEther(bals[0])).toFixed(4);
+        if (devBalEl) devBalEl.textContent = Number(ethers.formatEther(bals[1])).toFixed(4);
+        const sBal = await provider.getBalance(await signer.getAddress());
+        if (signerBalEl) signerBalEl.textContent = Number(ethers.formatEther(sBal)).toFixed(4);
+      } catch (e) {
+        if (signerBalEl) signerBalEl.textContent = "err";
+        if (contractBalEl) contractBalEl.textContent = "err";
+        if (devBalEl) devBalEl.textContent = "err";
+        setStatus("Balance fetch failed: " + e.message);
+      }
+    }
+
+    function openBalancesModal() {
+      if (balancesModalEl) {
+        balancesModalEl.classList.add("open");
+        balancesModalEl.setAttribute("aria-hidden", "false");
+        refreshBalancesModal();
+      }
+    }
+    function closeBalancesModal() {
+      if (balancesModalEl) {
+        balancesModalEl.classList.remove("open");
+        balancesModalEl.setAttribute("aria-hidden", "true");
+      }
+    }
+    async function refreshBalancesModal() {
+      if (!balancesTableBodyEl) return;
+      balancesTableBodyEl.innerHTML = "";
+      if (!provider) {
+        const tr = document.createElement("tr");
+        tr.innerHTML = "<td colspan='3'>Connect first to load balances.</td>";
+        balancesTableBodyEl.appendChild(tr);
+        return;
+      }
+      let currentAddr = null;
+      if (signer) try { currentAddr = await signer.getAddress(); } catch (_) {}
+      const rows = [
+        { label: "Current signer", addr: currentAddr },
+        { label: "Computer (AI wins)", addr: COMPUTER_ACCOUNT_ADDRESS },
+        { label: "Contract", addr: CONTRACT_ADDRESS },
+        { label: "Dev (fees)", addr: DEV_ACCOUNT_ADDRESS },
+      ];
+      for (const r of rows) {
+        const tr = document.createElement("tr");
+        let bal = "-";
+        if (r.addr) {
+          const b = await provider.getBalance(r.addr);
+          bal = Number(ethers.formatEther(b)).toFixed(4);
+        }
+        tr.innerHTML = `<td>${r.label}</td><td>${r.addr || "-"}</td><td>${bal}</td>`;
+        balancesTableBodyEl.appendChild(tr);
+      }
     }
 
     function init() {
@@ -333,10 +1062,28 @@
       const terminalCount = Array.from(precomputedStates.values()).filter(v => v.winner).length;
       uniqueStatesEl.textContent = precomputedStates.size;
       terminalStatesEl.textContent = terminalCount;
+      if (computerAccountAddrEl) computerAccountAddrEl.textContent = COMPUTER_ACCOUNT_ADDRESS;
       render();
+      stopTimer();
     }
 
-    resetBtn.addEventListener("click", reset);
+    document.getElementById("open-create-join-modal").addEventListener("click", openCreateJoinModal);
+    document.getElementById("close-create-join-modal").addEventListener("click", closeCreateJoinModal);
+    document.getElementById("computer-join").addEventListener("click", computerJoinLastGame);
+    document.getElementById("surrender-btn").addEventListener("click", surrenderOnChain);
+    document.getElementById("timeout-btn").addEventListener("click", claimTimeoutOnChain);
+    document.getElementById("view-balances").addEventListener("click", openBalancesModal);
+    document.getElementById("close-balances-modal").addEventListener("click", closeBalancesModal);
+    document.getElementById("refresh-balances-modal").addEventListener("click", refreshBalancesModal);
+    document.getElementById("apply-contract").addEventListener("click", applyContractAddress);
+    document.getElementById("deploy-contract").addEventListener("click", deployNewContract);
+    document.getElementById("use-computer").addEventListener("click", useComputerAccount);
+
+    connectBtn.addEventListener("click", connectWallet);
+    setAddrBtn.addEventListener("click", useDemoAddress);
+    createBtn.addEventListener("click", createGameOnChain);
+    joinBtn.addEventListener("click", joinGameOnChain);
+    refreshBalBtn.addEventListener("click", refreshBalances);
     init();
   </script>
 </body>
